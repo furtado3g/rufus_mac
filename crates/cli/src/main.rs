@@ -649,7 +649,10 @@ impl CliSink {
 
 impl ProgressSink for CliSink {
     fn report(&self, event: ProgressEvent) {
-        let is_data_phase = matches!(event.phase, Phase::Writing | Phase::Verifying);
+        let is_data_phase = matches!(
+            event.phase,
+            Phase::Writing | Phase::Copying | Phase::Verifying
+        );
         if !is_data_phase || event.total_bytes == 0 {
             eprintln!("{}", event.summary());
             return;
@@ -704,7 +707,7 @@ fn exit_code(err: &Error) -> u8 {
         Error::Permission(_) => 3,
         Error::DeviceNotFound(_) | Error::DeviceChanged { .. } | Error::UnsafeTarget(_) => 4,
         Error::InvalidImage(_) | Error::Unsupported(_) | Error::EmptyImage => 5,
-        Error::Io(_) | Error::ImageTooLarge { .. } => 6,
+        Error::Io(_) | Error::ImageTooLarge { .. } | Error::ExtractionTooLarge { .. } => 6,
         Error::VerifyMismatch { .. } => 7,
         Error::ExtractedFileMismatch { .. } => 7,
         Error::Cancelled => 8,
@@ -721,6 +724,9 @@ fn hint_for(err: &Error) -> Option<&'static str> {
         Error::UnsafeTarget(_) => Some("only USB/SD removable media can be used as targets"),
         Error::DeviceNotFound(_) => Some("run `image2usb list` and copy the device id exactly"),
         Error::InvalidImage(_) => Some("make sure the file is an ISO 9660 image"),
+        Error::ExtractionTooLarge { .. } => {
+            Some("use a larger USB drive or choose DD mode for this image")
+        }
         Error::Unsupported(message) if message.contains("Windows") => {
             Some("use --mode dd for Windows media (UEFI boot only) or wait for split-WIM support")
         }

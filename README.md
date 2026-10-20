@@ -6,7 +6,7 @@ image2usb is a portable, cross-platform alternative to Rufus written in Rust. It
 ships as a self-contained executable / app bundle: no installer, no runtime, no
 external tools required.
 
-> Status: **pre-alpha** (Phase 0.3 — extraction). Device enumeration, ISO
+> Status: **pre-alpha** (M2 — extraction hardening). Device enumeration, ISO
 > analysis, DD-mode writing and UEFI extraction are implemented; an extracted
 > image boots to a live desktop under QEMU/OVMF. GPT, BIOS bootloaders, Windows
 > media and physical-hardware validation are still in progress.
@@ -61,7 +61,7 @@ written 1:1 (non-hybrid ISOs):
 $ sudo image2usb write ubuntu-24.04.iso --device /dev/disk4 --mode extract --verify
 ```
 
-Current limits (Phase 0.3):
+Current limits (M2):
 
 - **UEFI boot only.** The image's own `EFI/BOOT/BOOT*.EFI` tree is copied, so
   modern UEFI firmware boots it. No syslinux/GRUB BIOS boot record is installed
@@ -69,9 +69,12 @@ Current limits (Phase 0.3):
 - **MBR + FAT32 only.** GPT and NTFS are rejected with an explicit error.
 - **Linux/BSD distributions only.** Windows installation media needs wimlib and
   split-WIM support, which is not implemented yet.
-- **Rock Ridge symlinks** are copied as empty regular files (the ISO reader does
-  not resolve them yet). Boot files are regular files, so this does not affect
-  UEFI boot, but a few convenience links may be empty.
+- **Rock Ridge symlinks** are detected from direct `SL` entries and from SUSP
+  `CE` continuation areas, then skipped with a warning because FAT32 has no
+  symlinks. Use DD mode if a boot path depends on a symlink.
+- **Space is checked before the MBR is touched.** Extraction estimates the FAT32
+  data area, directory-entry slots and long-file-name overhead and rejects a
+  target that is too small with an explicit error.
 - **`--output` is for tests.** Extraction writes into an existing pre-sized file
   of at least `ISO size + 16 MiB` (never less than 64 MiB); create it with
   `mkfile 256m` (macOS) or `truncate -s 256M` (Linux). Writing to a real device

@@ -5,6 +5,7 @@
 //! extraction is currently UEFI-only; hybrid images can still be written with
 //! DD mode.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -15,7 +16,7 @@ use image2usb_core::{
     CancelToken, Error, FileSystem as FilesystemKind, PartitionScheme, Phase, ProgressEvent,
     ProgressSink, RawIo, Result, VerifyMode, WriteOptions, util::format_bytes,
 };
-use image2usb_iso::{IsoInfo, SECTOR_SIZE, read_volume_descriptors, walk_tree};
+use image2usb_iso::{IsoInfo, SECTOR_SIZE, WalkEntry, read_volume_descriptors, walk_tree};
 use sha2::{Digest, Sha256};
 
 use crate::layout::{PartitionLayout, plan_layout, write_mbr};
@@ -104,14 +105,42 @@ pub fn extract_image(
         );
     }
 
+    let symlinks = entries
+        .iter()
+        .filter(|entry| entry.is_symlink())
+        .collect::<Vec<_>>();
+    if !symlinks.is_empty() {
+        let examples = symlinks
+            .iter()
+            .take(5)
+            .map(|entry| {
+                format!(
+                    "{} -> {}",
+                    entry.path,
+                    entry.symlink_target.as_deref().unwrap_or("?")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let suffix = if symlinks.len() > 5 { ", ..." } else { "" };
+        warnings.push(format!(
+            "skipped {} Rock Ridge symlink(s) because FAT32 has no symlinks: {examples}{suffix}",
+            symlinks.len()
+        ));
+    }
+
     let total_bytes = entries
         .iter()
-        .filter(|entry| !entry.is_dir)
+        .filter(|entry| !entry.is_dir && !entry.is_symlink())
         .map(|entry| entry.len as u64)
         .sum::<u64>();
 
+    // Refuse before the MBR is touched if the tree cannot fit in the FAT32
+    // data area. The formatter and the estimate use the same cluster rules.
+    check_extraction_space(&entries, &layout, options)?;
+
     sink.report(ProgressEvent::message(
-        Phase::Writing,
+        Phase::Formatting,
         format!(
             "creating MBR + FAT32 ({} partition)",
             format_bytes(layout.len)
@@ -122,6 +151,17 @@ pub fn extract_image(
 
     let mut part = PartitionIo::new(device, layout.start_byte, layout.len);
     format_fat32(&mut part, &layout, options, info)?;
+    sink.report(ProgressEvent::message(Phase::Formatting, "FAT32 formatted"));
+    sink.report(ProgressEvent::message(
+        Phase::Copying,
+        format!(
+            "copying {} file(s)",
+            entries
+                .iter()
+                .filter(|e| !e.is_dir && !e.is_symlink())
+                .count()
+        ),
+    ));
 
     let (manifest, stats_dirs, copied_bytes) = {
         let fs =
@@ -136,6 +176,9 @@ pub fn extract_image(
 
         for entry in &entries {
             cancel.check()?;
+            if entry.is_symlink() {
+                continue;
+            }
             let dest = names.resolve(&entry.path, entry.is_dir);
             if entry.is_dir {
                 root_dir
@@ -169,7 +212,7 @@ pub fn extract_image(
                 let now = Instant::now();
                 if now.duration_since(last_report) >= REPORT_INTERVAL {
                     sink.report(progress(
-                        Phase::Writing,
+                        Phase::Copying,
                         copied,
                         total_progress,
                         started,
@@ -186,7 +229,7 @@ pub fn extract_image(
             });
         }
         sink.report(progress(
-            Phase::Writing,
+            Phase::Copying,
             total_bytes,
             total_progress,
             started,
@@ -198,8 +241,14 @@ pub fn extract_image(
     };
 
     part.flush().map_err(Error::Io)?;
+    cancel.check()?;
+    sink.report(ProgressEvent::message(
+        Phase::Finalizing,
+        "finalizing FAT32 metadata",
+    ));
     crate::postprocess::finalize(&mut part).map_err(Error::Io)?;
     part.flush().map_err(Error::Io)?;
+    cancel.check()?;
     drop(part);
     device.sync()?;
 
@@ -215,6 +264,119 @@ pub fn extract_image(
         elapsed,
         warnings,
     })
+}
+
+const PREFLIGHT_MARGIN_CLUSTERS: u64 = 8;
+
+fn check_extraction_space(
+    entries: &[WalkEntry],
+    layout: &PartitionLayout,
+    options: &WriteOptions,
+) -> Result<()> {
+    let cluster = resolve_cluster_size(layout, options)?;
+    let required_clusters = required_data_clusters(entries, cluster);
+    let available_clusters = available_data_clusters(layout.len, cluster);
+
+    if required_clusters.saturating_add(PREFLIGHT_MARGIN_CLUSTERS) > available_clusters {
+        return Err(Error::ExtractionTooLarge {
+            required: required_clusters.saturating_mul(cluster),
+            available: available_clusters.saturating_mul(cluster),
+        });
+    }
+    Ok(())
+}
+
+fn resolve_cluster_size(layout: &PartitionLayout, options: &WriteOptions) -> Result<u64> {
+    let Some(cluster) = options.cluster_size else {
+        return Ok(default_cluster_size(layout.len));
+    };
+    let cluster = cluster.next_power_of_two();
+    if !(512..=32 * 1024).contains(&cluster) {
+        return Err(Error::Unsupported(format!(
+            "cluster size must be between 512 and 32768 bytes, got {cluster}"
+        )));
+    }
+    let clusters = layout.len / u64::from(cluster);
+    if clusters < 65_525 {
+        return Err(Error::Unsupported(format!(
+            "cluster size {cluster} is too large for this device (would create {clusters} \
+             clusters, FAT32 needs at least 65525)"
+        )));
+    }
+    Ok(u64::from(cluster))
+}
+
+/// Mirrors `fatfs::FormatVolumeOptions` when no cluster size is requested:
+/// 512 bytes up to 260 MiB, 4 KiB up to 8 GiB, then 1 KiB per 2 GiB capped at
+/// 32 KiB.
+fn default_cluster_size(total_bytes: u64) -> u64 {
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+    let cluster = if total_bytes <= 260 * MIB {
+        512
+    } else if total_bytes <= 8 * GIB {
+        4096
+    } else {
+        total_bytes.next_power_of_two() / (2 * GIB) * 1024
+    };
+    cluster.clamp(512, 32 * 1024)
+}
+
+/// Number of data clusters available after the reserved sectors and the two
+/// FATs. This follows the geometry calculation used by `fatfs`.
+fn available_data_clusters(partition_len: u64, cluster: u64) -> u64 {
+    let total_sectors = partition_len / 512;
+    const RESERVED_SECTORS: u64 = 8;
+    if total_sectors <= RESERVED_SECTORS {
+        return 0;
+    }
+    let sectors_per_cluster = (cluster / 512).max(1);
+    let t0 = total_sectors - RESERVED_SECTORS;
+    let bits_per_cluster = sectors_per_cluster * 512 * 8;
+    let denominator = bits_per_cluster / 32 + 2;
+    let fat_sectors = (t0 + 2 * sectors_per_cluster).div_ceil(denominator);
+    let data_sectors = total_sectors.saturating_sub(RESERVED_SECTORS + 2 * fat_sectors);
+    data_sectors / sectors_per_cluster
+}
+
+/// Estimated data clusters for the file and directory contents. Directory
+/// entry slots are deliberately overestimated (one short entry plus LFN
+/// entries for every name), because `fatfs` may allocate LFN records for names
+/// that do not fit 8.3.
+fn required_data_clusters(entries: &[WalkEntry], cluster: u64) -> u64 {
+    let cluster = cluster.max(512);
+    let mut names = NameMap::new();
+    let mut dir_slots: HashMap<String, u64> = HashMap::new();
+    dir_slots.insert(String::new(), 0);
+    let mut data_clusters = 0u64;
+
+    for entry in entries {
+        if entry.is_symlink() {
+            continue;
+        }
+        let dest = names.resolve(&entry.path, entry.is_dir);
+        let (parent, base) = dest
+            .rsplit_once('/')
+            .map_or(("", dest.as_str()), |(parent, base)| (parent, base));
+        *dir_slots.entry(parent.to_owned()).or_insert(0) += entry_slots(base);
+        if entry.is_dir {
+            // Subdirectories contain `.` and `..`.
+            dir_slots.entry(dest).or_insert(2);
+        } else {
+            data_clusters = data_clusters.saturating_add(u64::from(entry.len).div_ceil(cluster));
+        }
+    }
+
+    let dir_clusters = dir_slots
+        .values()
+        .map(|slots| (slots * 32).div_ceil(cluster).max(1))
+        .sum::<u64>();
+    data_clusters.saturating_add(dir_clusters)
+}
+
+fn entry_slots(name: &str) -> u64 {
+    let utf16_units = name.encode_utf16().count() as u64;
+    1 + utf16_units.div_ceil(13)
 }
 
 fn format_fat32(
@@ -240,20 +402,8 @@ fn format_fat32(
         .total_sectors(total_512 as u32)
         .fats(2)
         .volume_label(fat_label(label));
-    if let Some(cluster) = options.cluster_size {
-        let cluster = cluster.next_power_of_two();
-        if !(512..=32 * 1024).contains(&cluster) {
-            return Err(Error::Unsupported(format!(
-                "cluster size must be between 512 and 32768 bytes, got {cluster}"
-            )));
-        }
-        let clusters = layout.len / cluster as u64;
-        if clusters < 65_525 {
-            return Err(Error::Unsupported(format!(
-                "cluster size {cluster} is too large for this device (would create {clusters} \
-                 clusters, FAT32 needs at least 65525)"
-            )));
-        }
+    if options.cluster_size.is_some() {
+        let cluster = resolve_cluster_size(layout, options)? as u32;
         opts = opts.bytes_per_cluster(cluster);
     }
 
@@ -432,6 +582,9 @@ pub fn preview(iso_path: &Path) -> Result<(u64, u64, u64)> {
     let mut dirs = 0u64;
     let mut bytes = 0u64;
     for entry in &entries {
+        if entry.is_symlink() {
+            continue;
+        }
         names.resolve(&entry.path, entry.is_dir);
         if entry.is_dir {
             dirs += 1;
@@ -499,4 +652,43 @@ pub fn read_extracted(
     file.read_to_end(&mut out)
         .map_err(|err| fat_error(path, err))?;
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_cluster_size_matches_fatfs_thresholds() {
+        assert_eq!(default_cluster_size(128 * 1024 * 1024), 512);
+        assert_eq!(default_cluster_size(4 * 1024 * 1024 * 1024), 4096);
+        assert!(default_cluster_size(16 * 1024 * 1024 * 1024) > 4096);
+    }
+
+    #[test]
+    fn preflight_rejects_a_tree_that_does_not_fit() {
+        let layout = plan_layout(96 * 1024 * 1024, 512).unwrap();
+        let entries = vec![WalkEntry {
+            path: "BIG.BIN".to_owned(),
+            extent: 0,
+            len: 200 * 1024 * 1024,
+            is_dir: false,
+            symlink_target: None,
+        }];
+        let err = check_extraction_space(&entries, &layout, &WriteOptions::default()).unwrap_err();
+        assert!(matches!(err, Error::ExtractionTooLarge { .. }), "{err}");
+    }
+
+    #[test]
+    fn symlinks_do_not_consume_extraction_space() {
+        let layout = plan_layout(96 * 1024 * 1024, 512).unwrap();
+        let entries = vec![WalkEntry {
+            path: "LINK".to_owned(),
+            extent: 0,
+            len: u32::MAX,
+            is_dir: false,
+            symlink_target: Some("BIG.BIN".to_owned()),
+        }];
+        check_extraction_space(&entries, &layout, &WriteOptions::default()).unwrap();
+    }
 }

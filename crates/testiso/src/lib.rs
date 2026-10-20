@@ -73,9 +73,9 @@ fn dir_record(name: &[u8], extent: u32, len: u32, is_dir: bool) -> Vec<u8> {
     record
 }
 
-fn write_root_directory(builder: &mut Builder, sector: usize) {
+fn write_root_directory(builder: &mut Builder, sector: usize, extra: &[Vec<u8>]) {
     let mut offset = 0;
-    let entries = vec![
+    let mut entries = vec![
         dir_record(&[0x00], sector as u32, SECTOR as u32, true),
         dir_record(&[0x01], sector as u32, SECTOR as u32, true),
         dir_record(b"EFI", 22, SECTOR as u32, true),
@@ -83,6 +83,7 @@ fn write_root_directory(builder: &mut Builder, sector: usize) {
         dir_record(b"CASPER", 24, SECTOR as u32, true),
         dir_record(b".DISK", 26, SECTOR as u32, true),
     ];
+    entries.extend(extra.iter().cloned());
     for entry in entries {
         let start = sector * SECTOR + offset;
         builder.data[start..start + entry.len()].copy_from_slice(&entry);
@@ -180,6 +181,32 @@ fn write_mbr(builder: &mut Builder, bootable: bool, hybrid: bool) {
 }
 
 pub fn build_image(path: &Path, platform: u8, hybrid: bool) {
+    build_image_with_root_extra(path, platform, hybrid, Vec::new());
+}
+
+/// Build the standard fixture plus a Rock Ridge symlink at the root.
+pub fn build_image_with_symlink(path: &Path, platform: u8, hybrid: bool) {
+    build_image_with_root_extra(
+        path,
+        platform,
+        hybrid,
+        vec![symlink_record(b"BOOTLINK", "EFI/BOOT/BOOTX64.EFI")],
+    );
+}
+
+/// Build the standard fixture plus a file record whose declared size is larger
+/// than any test target. Extraction must reject it during preflight, before it
+/// writes the MBR.
+pub fn build_image_with_large_file(path: &Path, len: u32) {
+    build_image_with_root_extra(
+        path,
+        0xEF,
+        true,
+        vec![dir_record(b"HUGE.BIN", 34, len, false)],
+    );
+}
+
+fn build_image_with_root_extra(path: &Path, platform: u8, hybrid: bool, extra: Vec<Vec<u8>>) {
     let mut b = Builder::new();
     write_mbr(&mut b, true, hybrid);
     write_pvd(&mut b);
@@ -187,7 +214,7 @@ pub fn build_image(path: &Path, platform: u8, hybrid: bool) {
     write_terminator(&mut b);
     write_catalog(&mut b, platform);
 
-    write_root_directory(&mut b, 20);
+    write_root_directory(&mut b, 20, &extra);
     write_subdirectory(&mut b, 22, 20, &[(b"BOOT", 25, SECTOR as u32, true)]);
     write_subdirectory(&mut b, 23, 20, &[(b"ISOLINUX.CFG", 32, 10, false)]);
     write_subdirectory(&mut b, 24, 20, &[]);
@@ -198,4 +225,26 @@ pub fn build_image(path: &Path, platform: u8, hybrid: bool) {
     b.data[32 * SECTOR..32 * SECTOR + ISOLINUX_CFG.len()].copy_from_slice(ISOLINUX_CFG);
     b.data[33 * SECTOR..33 * SECTOR + DISK_INFO.len()].copy_from_slice(DISK_INFO);
     b.build(path);
+}
+
+fn symlink_record(name: &[u8], target: &str) -> Vec<u8> {
+    let name_len = name.len();
+    let mut record = dir_record(name, 0, 0, false);
+    debug_assert_eq!(record.len(), (33 + name_len).next_multiple_of(2));
+
+    // SP marks the System Use area as SUSP/Rock Ridge.
+    record.extend_from_slice(&[b'S', b'P', 7, 1, 0xBE, 0xEF, 0]);
+
+    // A single normal component; the target itself may contain `/`.
+    let mut sl = vec![b'S', b'L', 0, 1, 0];
+    sl.push((target.len() + 2) as u8);
+    sl.push(0);
+    sl.extend_from_slice(target.as_bytes());
+    sl[2] = sl.len() as u8;
+    record.extend_from_slice(&sl);
+    if !record.len().is_multiple_of(2) {
+        record.push(0);
+    }
+    record[0] = record.len() as u8;
+    record
 }

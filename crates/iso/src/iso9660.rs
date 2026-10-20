@@ -5,6 +5,7 @@ use crate::{IsoError, Result};
 
 pub const SECTOR_SIZE: u64 = 2048;
 const MAX_DIR_BYTES: usize = 8 * 1024 * 1024;
+const MAX_SUSP_BYTES: usize = 64 * 1024;
 
 /// A directory record as stored in an ISO 9660 directory extent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,11 +18,17 @@ pub struct DirRecord {
     pub flags: u8,
     /// Decoded name (`.` and `..` kept as-is).
     pub name: String,
+    /// Rock Ridge `SL` target, when this record is a symlink.
+    pub symlink_target: Option<String>,
 }
 
 impl DirRecord {
     pub fn is_dir(&self) -> bool {
         self.flags & 0x02 != 0
+    }
+
+    pub fn is_symlink(&self) -> bool {
+        self.symlink_target.is_some()
     }
 }
 
@@ -144,7 +151,7 @@ fn has_rock_ridge(record: &[u8]) -> bool {
     }
     record[start..end]
         .windows(2)
-        .any(|w| w == b"SP" || w == b"RR" || w == b"ER")
+        .any(|w| w == b"SP" || w == b"RR" || w == b"ER" || w == b"SL")
 }
 
 pub fn parse_dir_record(bytes: &[u8], joliet: bool) -> Result<DirRecord> {
@@ -164,12 +171,150 @@ pub fn parse_dir_record(bytes: &[u8], joliet: bool) -> Result<DirRecord> {
     }
     let raw_name = &bytes[33..33 + name_len];
     let name = decode_name(raw_name, joliet);
+    let symlink_target = parse_rock_ridge_symlink(&bytes[..len]);
     Ok(DirRecord {
         extent,
         len: data_len,
         flags,
         name,
+        symlink_target,
     })
+}
+
+/// Parse Rock Ridge `SL` entries from the System Use area of a directory
+/// record. FAT32 has no symlinks, so callers use this to skip them instead of
+/// materializing empty files.
+fn parse_rock_ridge_symlink(record: &[u8]) -> Option<String> {
+    let start = susp_start(record)?;
+    let mut target = String::new();
+    parse_susp_sl_into(&record[start..], &mut target).then_some(target)
+}
+
+fn susp_start(record: &[u8]) -> Option<usize> {
+    if record.len() < 34 {
+        return None;
+    }
+    let name_len = record[32] as usize;
+    if 33 + name_len > record.len() {
+        return None;
+    }
+    Some((33 + name_len).next_multiple_of(2))
+}
+
+/// Parse a sequence of SUSP entries starting at `entries[0]`. Returns true if
+/// at least one `SL` entry was found.
+fn parse_susp_sl_into(entries: &[u8], target: &mut String) -> bool {
+    let mut pos = 0usize;
+    let mut found = false;
+    while pos + 4 <= entries.len() {
+        let signature = &entries[pos..pos + 2];
+        let entry_len = entries[pos + 2] as usize;
+        if entry_len < 4 || pos + entry_len > entries.len() {
+            break;
+        }
+        if signature == b"SL" {
+            found = true;
+            append_sl_components(&entries[pos + 4..pos + entry_len], target);
+        }
+        pos += entry_len;
+    }
+    found
+}
+
+/// Locate a SUSP continuation area (`CE`) in a sequence of SUSP entries.
+fn find_susp_ce(entries: &[u8]) -> Option<(u32, u32, u32)> {
+    let mut pos = 0usize;
+    while pos + 4 <= entries.len() {
+        let signature = &entries[pos..pos + 2];
+        let entry_len = entries[pos + 2] as usize;
+        if entry_len < 4 || pos + entry_len > entries.len() {
+            break;
+        }
+        if signature == b"CE" && entry_len >= 28 {
+            let block = le_u32(&entries[pos + 4..pos + 8]);
+            let offset = le_u32(&entries[pos + 12..pos + 16]);
+            let length = le_u32(&entries[pos + 20..pos + 24]);
+            return Some((block, offset, length));
+        }
+        pos += entry_len;
+    }
+    None
+}
+
+/// Read `SL` entries from `CE` continuation areas. Rock Ridge uses these for
+/// metadata that does not fit in the directory record, including long symlink
+/// targets. Invalid or missing continuation areas are ignored so one bad
+/// record cannot abort the whole image.
+fn read_continuation_symlink(file: &mut File, record: &[u8]) -> Option<String> {
+    let start = susp_start(record)?;
+    let mut ce = find_susp_ce(&record[start..]);
+    let mut target = String::new();
+    let mut found = false;
+    let mut depth = 0u8;
+    while let Some((block, offset, length)) = ce {
+        if depth >= 4 || length == 0 || length as usize > MAX_SUSP_BYTES {
+            break;
+        }
+        let mut data = vec![0u8; length as usize];
+        let position = u64::from(block) * SECTOR_SIZE + u64::from(offset);
+        if file.seek(SeekFrom::Start(position)).is_err() || file.read_exact(&mut data).is_err() {
+            break;
+        }
+        if parse_susp_sl_into(&data, &mut target) {
+            found = true;
+        }
+        ce = find_susp_ce(&data);
+        depth += 1;
+    }
+    found.then_some(target)
+}
+
+fn parse_dir_record_with_continuation(
+    file: &mut File,
+    bytes: &[u8],
+    joliet: bool,
+) -> Result<DirRecord> {
+    let mut entry = parse_dir_record(bytes, joliet)?;
+    if let Some(extra) = read_continuation_symlink(file, &bytes[..bytes[0] as usize]) {
+        if let Some(target) = entry.symlink_target.as_mut() {
+            if !target.is_empty() && !target.ends_with('/') && !extra.starts_with('/') {
+                target.push('/');
+            }
+            target.push_str(&extra);
+        } else {
+            entry.symlink_target = Some(extra);
+        }
+    }
+    Ok(entry)
+}
+
+fn append_sl_components(data: &[u8], target: &mut String) {
+    let mut pos = 1usize; // first byte is the SL flags
+    while pos + 2 <= data.len() {
+        let component_len = data[pos] as usize;
+        if component_len < 2 || pos + component_len > data.len() {
+            break;
+        }
+        let flags = data[pos + 1];
+        let bytes = &data[pos + 2..pos + component_len];
+        let component = match flags {
+            0x01 => ".".to_owned(),
+            0x02 => "..".to_owned(),
+            0x03 | 0x04 => "/".to_owned(),
+            _ => String::from_utf8_lossy(bytes).into_owned(),
+        };
+        if component == "/" {
+            if !target.starts_with('/') {
+                target.insert(0, '/');
+            }
+        } else {
+            if !target.is_empty() && !target.ends_with('/') {
+                target.push('/');
+            }
+            target.push_str(&component);
+        }
+        pos += component_len;
+    }
 }
 
 fn decode_name(raw: &[u8], joliet: bool) -> String {
@@ -239,7 +384,7 @@ pub fn read_dir(
             break;
         }
         let record = &data[pos..pos + record_len];
-        match parse_dir_record(record, joliet) {
+        match parse_dir_record_with_continuation(file, record, joliet) {
             Ok(entry) => {
                 if entry.name != "." && entry.name != ".." && !entry.name.is_empty() {
                     out.push(entry);
@@ -261,6 +406,14 @@ pub struct WalkEntry {
     pub extent: u32,
     pub len: u32,
     pub is_dir: bool,
+    /// Rock Ridge symlink target, when the entry is a symlink.
+    pub symlink_target: Option<String>,
+}
+
+impl WalkEntry {
+    pub fn is_symlink(&self) -> bool {
+        self.symlink_target.is_some()
+    }
 }
 
 /// Recursively list a directory tree, parents before children.
@@ -288,13 +441,15 @@ pub fn walk_tree(
             } else {
                 format!("{prefix}/{}", record.name)
             };
-            if record.is_dir() {
+            let symlink = record.symlink_target.clone();
+            if record.is_dir() && symlink.is_none() {
                 if visited.insert(record.extent) {
                     out.push(WalkEntry {
                         path: path.clone(),
                         extent: record.extent,
                         len: record.len,
                         is_dir: true,
+                        symlink_target: None,
                     });
                     stack.push((record, path, depth + 1));
                 }
@@ -303,7 +458,8 @@ pub fn walk_tree(
                     path,
                     extent: record.extent,
                     len: record.len,
-                    is_dir: false,
+                    is_dir: record.is_dir() && symlink.is_none(),
+                    symlink_target: symlink,
                 });
             }
             if out.len() >= max_entries {
@@ -368,5 +524,85 @@ mod tests {
         assert_eq!(parsed.extent, 42);
         assert_eq!(parsed.len, 512);
         assert!(parsed.is_dir());
+        assert!(!parsed.is_symlink());
+    }
+
+    #[test]
+    fn parses_rock_ridge_symlink() {
+        let record = record_with_symlink(b"LINK", "../../target");
+        let parsed = parse_dir_record(&record, false).unwrap();
+        assert_eq!(parsed.name, "LINK");
+        assert!(parsed.is_symlink());
+        assert_eq!(parsed.symlink_target.as_deref(), Some("../../target"));
+    }
+
+    #[test]
+    fn reads_symlink_from_susp_continuation_area() {
+        use std::io::Write;
+
+        let mut file = tempfile::tempfile().unwrap();
+        file.set_len(2 * SECTOR_SIZE).unwrap();
+        let record = record_with_ce_symlink(b"LINK", 1, 0, sl_entry("../target").len() as u32);
+        file.write_all(&record).unwrap();
+        file.seek(SeekFrom::Start(SECTOR_SIZE)).unwrap();
+        file.write_all(&sl_entry("../target")).unwrap();
+
+        let dir = DirRecord {
+            extent: 0,
+            len: SECTOR_SIZE as u32,
+            flags: 0x02,
+            name: ".".to_owned(),
+            symlink_target: None,
+        };
+        let entries = read_dir(&mut file, &dir, false, 10).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].is_symlink());
+        assert_eq!(entries[0].symlink_target.as_deref(), Some("../target"));
+    }
+
+    fn record_with_symlink(name: &[u8], target: &str) -> Vec<u8> {
+        let mut record = base_record(name);
+        record.extend_from_slice(&[b'S', b'P', 7, 1, 0xBE, 0xEF, 0]);
+        record.extend_from_slice(&sl_entry(target));
+        finish_record(record)
+    }
+
+    fn record_with_ce_symlink(name: &[u8], block: u32, offset: u32, len: u32) -> Vec<u8> {
+        let mut record = base_record(name);
+        record.extend_from_slice(&[b'S', b'P', 7, 1, 0xBE, 0xEF, 0]);
+        let mut ce = vec![b'C', b'E', 28, 1];
+        ce.extend_from_slice(&block.to_le_bytes());
+        ce.extend_from_slice(&block.to_be_bytes());
+        ce.extend_from_slice(&offset.to_le_bytes());
+        ce.extend_from_slice(&offset.to_be_bytes());
+        ce.extend_from_slice(&len.to_le_bytes());
+        ce.extend_from_slice(&len.to_be_bytes());
+        record.extend_from_slice(&ce);
+        finish_record(record)
+    }
+
+    fn base_record(name: &[u8]) -> Vec<u8> {
+        let name_len = name.len();
+        let mut record = vec![0u8; (33 + name_len).next_multiple_of(2)];
+        record[32] = name_len as u8;
+        record[33..33 + name_len].copy_from_slice(name);
+        record
+    }
+
+    fn sl_entry(target: &str) -> Vec<u8> {
+        let mut sl = vec![b'S', b'L', 0, 1, 0];
+        sl.push((target.len() + 2) as u8);
+        sl.push(0);
+        sl.extend_from_slice(target.as_bytes());
+        sl[2] = sl.len() as u8;
+        sl
+    }
+
+    fn finish_record(mut record: Vec<u8>) -> Vec<u8> {
+        if !record.len().is_multiple_of(2) {
+            record.push(0);
+        }
+        record[0] = record.len() as u8;
+        record
     }
 }

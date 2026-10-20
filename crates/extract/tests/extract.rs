@@ -1,9 +1,12 @@
 //! End-to-end extraction against the synthetic ISO fixture.
 
-use image2usb_core::{CancelToken, FileDevice, NoopSink, RawIo, VerifyMode, WriteOptions};
+use image2usb_core::{CancelToken, Error, FileDevice, NoopSink, RawIo, VerifyMode, WriteOptions};
 use image2usb_extract::{extract_image, list_extracted, plan_layout, preview, read_extracted};
 use image2usb_iso::analyze_path;
-use image2usb_testiso::{DISK_INFO, EFI_BOOT, ISOLINUX_CFG, build_image};
+use image2usb_testiso::{
+    DISK_INFO, EFI_BOOT, ISOLINUX_CFG, build_image, build_image_with_large_file,
+    build_image_with_symlink,
+};
 
 #[test]
 fn extracts_uefi_tree_into_mbr_fat32() {
@@ -84,6 +87,74 @@ fn extracts_uefi_tree_into_mbr_fat32() {
     let free = u32::from_le_bytes(fsinfo[488..492].try_into().unwrap());
     assert_ne!(free, u32::MAX);
     assert!(free > 0);
+}
+
+#[test]
+fn skips_rock_ridge_symlinks_with_a_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let iso = dir.path().join("test.iso");
+    build_image_with_symlink(&iso, 0xEF, true);
+    let info = analyze_path(&iso).unwrap();
+
+    let disk = dir.path().join("disk.img");
+    std::fs::write(&disk, vec![0u8; 96 * 1024 * 1024]).unwrap();
+    let mut device = FileDevice::open(&disk).unwrap();
+    let layout = plan_layout(device.size(), device.logical_sector_size()).unwrap();
+
+    // The symlink is not a regular file and is not counted by the preview.
+    assert_eq!(preview(&iso).unwrap(), (3, 5, 30));
+
+    let stats = extract_image(
+        &iso,
+        &info,
+        &mut device,
+        &WriteOptions::default(),
+        &CancelToken::new(),
+        &NoopSink,
+    )
+    .unwrap();
+    assert_eq!(stats.files, 3);
+    assert_eq!(stats.directories, 5);
+    assert_eq!(stats.bytes, 30);
+    assert!(
+        stats
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("symlink") && warning.contains("BOOTLINK")),
+        "{:?}",
+        stats.warnings
+    );
+
+    let entries = list_extracted(&mut device, &layout).unwrap();
+    let names: Vec<&str> = entries.iter().map(|(path, _)| path.as_str()).collect();
+    assert!(!names.contains(&"BOOTLINK"), "{names:?}");
+}
+
+#[test]
+fn rejects_too_large_tree_before_mbr_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let iso = dir.path().join("test.iso");
+    build_image_with_large_file(&iso, 256 * 1024 * 1024);
+    let info = analyze_path(&iso).unwrap();
+
+    let disk = dir.path().join("disk.img");
+    std::fs::write(&disk, vec![0u8; 96 * 1024 * 1024]).unwrap();
+    let mut device = FileDevice::open(&disk).unwrap();
+
+    let err = extract_image(
+        &iso,
+        &info,
+        &mut device,
+        &WriteOptions::default(),
+        &CancelToken::new(),
+        &NoopSink,
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::ExtractionTooLarge { .. }), "{err}");
+
+    let mut mbr = [0u8; 512];
+    device.read_exact_at(0, &mut mbr).unwrap();
+    assert_eq!(mbr, [0u8; 512]);
 }
 
 #[test]

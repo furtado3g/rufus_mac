@@ -1,8 +1,8 @@
 # image2usb roadmap
 
-Status: **pre-alpha, extraction and QEMU/OVMF UEFI boot milestones complete**.
+Status: **pre-alpha, UEFI boot validated; M2 extraction hardening in progress**.
 Last updated: 2026-10-20.
-Main branch: `main` at `a26a9aa`.
+Main branch: `main` (see `git log`).
 
 This is the working plan for the next milestones. Each milestone lists the goal,
 the concrete tasks, the acceptance criteria and the main risks. A milestone is
@@ -17,7 +17,7 @@ repository and CI is green.
 | Device safety | Done | USB/SD only, system disk refused, identity rechecked, explicit confirmation, failing offset reported |
 | ISO analysis | Done | ISO 9660, Joliet, Rock Ridge names, El Torito, hybrid MBR/GPT, distro markers |
 | DD mode | Done | 4 MiB chunks, progress, cancel, SHA-256 verify |
-| Extraction | MBR + FAT32, UEFI | Real 3.0 GiB Ubuntu derivative: `fsck_msdos` clean, 290/290 `md5sum.txt` matches |
+| Extraction | MBR + FAT32, UEFI | Real 3.0 GiB Ubuntu derivative: space preflight, `fsck_msdos` clean, 290/290 `md5sum.txt` matches, live desktop |
 | CLI | Done | `list`, `analyze`, `write`; `--mode auto|dd|extract`, `--device`, `--output`, `--yes`, `--dry-run`, `--verify`, `--label` |
 | GUI | Done for DD/extract | egui/eframe, device picker, analysis, progress, Windows-extraction warning |
 | Portable artifacts | Partial | Release workflow drafted; AppImage, signing and notarization pending |
@@ -27,7 +27,7 @@ repository and CI is green.
 | Windows media | Not implemented | Rejected with an explicit `Unsupported` error |
 | GPT / NTFS | Not implemented | MBR + FAT32 only |
 | ARM64 targets | CI only | Windows ARM64 and Linux ARM64 paths not locally validated |
-| Rock Ridge symlinks | Known gap | Copied as empty regular files; no symlink target resolution |
+| Rock Ridge symlinks | Done (skip) | Direct `SL` and SUSP `CE` targets detected; symlinks skipped with a warning because FAT32 has none |
 
 ### Validated commands
 
@@ -199,8 +199,9 @@ so it is not an extraction regression.
 - OVMF may require partition type `0xEF`; real firmware may accept `0x0C` too.
 - Secure Boot on physical hardware may reject unsigned GRUB; Ubuntu's signed
   `BOOTX64.EFI` should work, but custom assets need a shim.
-- Rock Ridge symlinks in the ISO are currently empty files; most boot paths are
-  regular files, but a distro may rely on a symlinked config.
+- Rock Ridge symlinks are skipped rather than materialized as empty files; a
+  distro that relies on a symlinked boot path still needs DD mode or a future
+  target-resolution pass.
 
 ### M2 — Extraction hardening
 
@@ -209,14 +210,17 @@ cases.
 
 **Tasks**
 
-- [ ] Parse Rock Ridge `SL` entries and skip symlinks with a warning (FAT32 has
+- [x] Parse Rock Ridge `SL` entries and skip symlinks with a warning (FAT32 has
       no symlinks), or copy the target for file symlinks. Do not create empty
-      files silently.
-- [ ] Preflight free space: sum file sizes and estimated FAT/directory overhead
+      files silently. Direct entries and SUSP `CE` continuation areas are
+      handled.
+- [x] Preflight free space: sum file sizes and estimated FAT/directory overhead
       against the partition size; fail before writing the MBR.
-- [ ] Split progress into `Formatting`, `Copying`, `Finalizing`, `Verifying` and
+- [x] Split progress into `Formatting`, `Copying`, `Finalizing`, `Verifying` and
       make the ETA use the copy phase only.
-- [ ] Make cancellation responsive during formatting/finalization.
+- [ ] Make cancellation responsive during formatting/finalization. Cancellation
+      is checked before and after these calls, but `fatfs::format_volume` and the
+      post-processing pass are not yet chunked.
 - [ ] Add 4096-byte logical-sector and 4Kn device tests (file-backed tests plus
       a real device when available).
 - [ ] Harden FAT names: Unicode normalization (NFC/NFD), trailing dots/spaces,
@@ -230,6 +234,12 @@ cases.
       for hybrid ISO/UDF images.
 - [ ] Add a `--jobs` or read-ahead option only if benchmarks justify it; write
       throughput should be device-bound.
+
+**Status (2026-10-20):** direct/CE symlink handling, FAT32 space preflight and
+phase-split progress are implemented and covered by synthetic tests. The real
+3.0 GiB image was re-extracted, passed `fsck_msdos`, matched all 290
+`md5sum.txt` entries and reached the live desktop under QEMU/OVMF. Multi-distro,
+4Kn, CI `fsck` and fine-grained cancellation remain open.
 
 **Acceptance**
 
@@ -441,8 +451,9 @@ Copy this into `docs/validation/<date>-<firmware>.md`:
 
 1. **M1** QEMU/OVMF validation is complete; keep physical-hardware testing in
    M7.
-2. Do **M2** (Rock Ridge symlinks + free-space preflight); this is low-risk and
-   improves every distro.
+2. Finish the remaining **M2** hardening (4Kn tests, FAT name edge cases,
+   multi-distro mount/compare, CI `fsck`, fine-grained cancellation). Symlinks
+   and free-space preflight are already implemented.
 3. Add **M3** (GPT/ESP) so firmware and future Windows work have a foundation.
 4. Choose between **M4** (BIOS) and **M5** (Windows) based on user demand; BIOS
    is smaller, Windows is the larger Rufus parity gap.

@@ -27,6 +27,12 @@ pub enum Error {
     #[error("image ({required} bytes) does not fit on the device ({available} bytes)")]
     ImageTooLarge { required: u64, available: u64 },
 
+    #[error(
+        "not enough space for extraction: files and directories need about {required} bytes, \
+         but the partition data area has {available} bytes"
+    )]
+    ExtractionTooLarge { required: u64, available: u64 },
+
     #[error("operation cancelled")]
     Cancelled,
 
