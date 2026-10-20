@@ -259,6 +259,15 @@ fn cancelled_extraction_does_not_touch_the_device() {
 
 #[test]
 fn extracted_fat32_passes_platform_fsck() {
+    assert_platform_fsck(PartitionScheme::Mbr);
+}
+
+#[test]
+fn extracted_gpt_fat32_passes_platform_fsck() {
+    assert_platform_fsck(PartitionScheme::Gpt);
+}
+
+fn assert_platform_fsck(scheme: PartitionScheme) {
     let dir = tempfile::tempdir().unwrap();
     let iso = dir.path().join("test.iso");
     build_image(&iso, 0xEF, true);
@@ -267,12 +276,23 @@ fn extracted_fat32_passes_platform_fsck() {
     let disk = dir.path().join("disk.img");
     std::fs::write(&disk, vec![0u8; 96 * 1024 * 1024]).unwrap();
     let mut device = FileDevice::open(&disk).unwrap();
-    let layout = plan_layout(device.size(), device.logical_sector_size()).unwrap();
+    let partition_layout = match scheme {
+        PartitionScheme::Mbr => plan_layout(device.size(), device.logical_sector_size()).unwrap(),
+        PartitionScheme::Gpt => {
+            plan_gpt_layout(device.size(), device.logical_sector_size())
+                .unwrap()
+                .partition
+        }
+    };
+    let options = WriteOptions {
+        scheme,
+        ..WriteOptions::default()
+    };
     extract_image(
         &iso,
         &info,
         &mut device,
-        &WriteOptions::default(),
+        &options,
         &CancelToken::new(),
         &NoopSink,
     )
@@ -286,9 +306,10 @@ fn extracted_fat32_passes_platform_fsck() {
         return;
     };
 
-    // fsck wants the partition, not the whole disk with its MBR.
+    // fsck wants the partition, not the whole disk with its partition table.
     let image = std::fs::read(&disk).unwrap();
-    let partition = &image[layout.start_byte as usize..layout.end_byte() as usize];
+    let partition =
+        &image[partition_layout.start_byte as usize..partition_layout.end_byte() as usize];
     let part_path = dir.path().join("partition.img");
     std::fs::write(&part_path, partition).unwrap();
 
@@ -394,6 +415,56 @@ impl RawIo for SectorDevice {
         self.inner.invalidate()
     }
 }
+
+#[test]
+fn extracts_gpt_with_4k_logical_sectors() {
+    let dir = tempfile::tempdir().unwrap();
+    let iso = dir.path().join("test.iso");
+    build_image(&iso, 0xEF, true);
+    let info = analyze_path(&iso).unwrap();
+
+    let disk = dir.path().join("disk.img");
+    std::fs::write(&disk, vec![0u8; 96 * 1024 * 1024]).unwrap();
+    let mut device = SectorDevice {
+        inner: FileDevice::open(&disk).unwrap(),
+        sector: 4096,
+    };
+    let gpt = plan_gpt_layout(device.size(), device.logical_sector_size()).unwrap();
+    assert_eq!(gpt.partition.start_lba, 256);
+    let options = WriteOptions {
+        scheme: PartitionScheme::Gpt,
+        ..WriteOptions::default()
+    };
+    extract_image(
+        &iso,
+        &info,
+        &mut device,
+        &options,
+        &CancelToken::new(),
+        &NoopSink,
+    )
+    .unwrap();
+    assert_eq!(
+        read_extracted(&mut device, &gpt.partition, "EFI/BOOT/BOOTX64.EFI").unwrap(),
+        EFI_BOOT
+    );
+
+    let mut header = [0u8; 92];
+    device.read_exact_at(4096, &mut header).unwrap();
+    assert_eq!(&header[0..8], b"EFI PART");
+    let mut entry = [0u8; 16];
+    device.read_exact_at(8192, &mut entry).unwrap();
+    assert_eq!(&entry, &ESP_TYPE_GUID_FOR_TEST);
+    let mut backup = [0u8; 92];
+    device
+        .read_exact_at(gpt.last_lba * 4096, &mut backup)
+        .unwrap();
+    assert_eq!(&backup[0..8], b"EFI PART");
+}
+
+const ESP_TYPE_GUID_FOR_TEST: [u8; 16] = [
+    0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B,
+];
 
 #[test]
 fn rejects_windows_media_before_touching_the_device() {
