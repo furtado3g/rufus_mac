@@ -1,6 +1,6 @@
 # image2usb roadmap
 
-Status: **pre-alpha, UEFI boot validated; M2 extraction hardening and M3 GPT/ESP implemented**.
+Status: **pre-alpha; M2 multi-distro extraction and M3 GPT/ESP validated in QEMU/OVMF; physical hardware pending**.
 Last updated: 2026-10-20.
 Main branch: `main` (see `git log`).
 
@@ -17,7 +17,7 @@ repository and CI is green.
 | Device safety | Done | USB/SD only, system disk refused, identity rechecked, explicit confirmation, failing offset reported |
 | ISO analysis | Done | ISO 9660, Joliet, Rock Ridge names, El Torito, hybrid MBR/GPT, distro markers |
 | DD mode | Done | 4 MiB chunks, progress, cancel, SHA-256 verify |
-| Extraction | MBR/GPT + FAT32, UEFI | Real 3.0 GiB Ubuntu derivative: space preflight, `fsck_msdos` clean, 290/290 `md5sum.txt` matches, live desktop; MBR and GPT/ESP both boot; 4Kn file-backed and platform `fsck` tests |
+| Extraction | MBR/GPT + FAT32, UEFI | Five distros (Ubuntu, Alpine, Debian, Fedora, Arch) pass space preflight, mount and `fsck`; Ubuntu boots to live desktop (MBR and GPT/ESP), Fedora to Anaconda and Alpine to login; 4Kn file-backed and platform `fsck` tests |
 | CLI | Done | `list`, `analyze`, `write`; `--mode auto|dd|extract`, `--scheme mbr|gpt`, `--device`, `--output`, `--yes`, `--dry-run`, `--verify`, `--label` |
 | GUI | Done for DD/extract | egui/eframe, device picker, analysis, progress, Windows-extraction warning |
 | Portable artifacts | Partial | Release workflow drafted; AppImage, signing and notarization pending |
@@ -29,6 +29,7 @@ repository and CI is green.
 | NTFS / second data partition | Not implemented | Single FAT32 ESP only; large-tree split is deferred |
 | ARM64 targets | CI only | Windows ARM64 and Linux ARM64 paths not locally validated |
 | Rock Ridge symlinks | Done (skip) | Direct `SL` and SUSP `CE` targets detected; symlinks skipped with a warning because FAT32 has none |
+| Boot config labels | Done | Long ISO labels are rewritten to FAT32's 11-character label in `grub.cfg`/`isolinux.cfg`; Fedora's Anaconda boot validates this |
 
 ### Validated commands
 
@@ -467,13 +468,14 @@ Copy this into `docs/validation/<date>-<firmware>.md`:
 
 1. **M1** QEMU/OVMF validation is complete; keep physical-hardware testing in
    M7.
-2. Finish the remaining **M2** hardening (multi-distro mount/compare and
-   fine-grained formatting cancellation). Symlinks, free-space preflight, 4Kn
-   file-backed tests, FAT name edge cases and CI `fsck` are already implemented.
+2. **M2** acceptance is met for five distributions. Remaining polish is
+   fine-grained formatting cancellation, a physical 4Kn device and the future
+   UDF >4 GiB guard; Mint/Pop!_OS coverage is optional.
 3. **M3** (GPT/ESP) is implemented and boot-tested; finish optional `gdisk`/`parted`
    checks before calling it fully closed.
 4. Choose between **M4** (BIOS) and **M5** (Windows) based on user demand; BIOS
-   is smaller, Windows is the larger Rufus parity gap.
+   needs a bootloader-asset/licensing strategy, Windows is the larger Rufus parity
+   gap and needs wimlib/split-WIM plus test media.
 5. Finish **M6** once the feature set is stable; signing credentials are the
    long-lead item.
 6. Run **M7** on real hardware before tagging 1.0.
