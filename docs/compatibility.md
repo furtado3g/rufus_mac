@@ -37,12 +37,41 @@ Ubuntu derivative extracted to a local image at about 103 MiB/s and verified at
 about 123 MiB/s; all 290 files listed in the ISO's own `md5sum.txt` matched.
 Booting it on real firmware is still on the verification list below.
 
-## QEMU smoke test (planned for phase 0.1)
+## Booting an extracted image in QEMU (UEFI)
+
+This validates the whole chain (MBR → FAT32 → `EFI/BOOT/BOOT*.EFI` → GRUB)
+without touching a physical USB drive. Install QEMU/OVMF first. On an Intel Mac
+the recommended setup is MacPorts (`sudo port install qemu`; Homebrew's `qemu`
+also works), and on Debian/Ubuntu it is `qemu-system-x86` + `ovmf`:
+
+```console
+$ QEMU_PREFIX=/opt/local/share/qemu          # Homebrew: "$(brew --prefix)/share/qemu"
+$ cp "$QEMU_PREFIX/edk2-i386-vars.fd" /tmp/ovmf-vars.fd
+$ qemu-system-x86_64 \
+    -machine q35,accel=hvf -cpu host -m 4096 -smp 4 \
+    -drive if=pflash,format=raw,readonly=on,file="$QEMU_PREFIX/edk2-x86_64-code.fd" \
+    -drive if=pflash,format=raw,file=/tmp/ovmf-vars.fd \
+    -drive if=none,id=usb,format=raw,snapshot=on,file=/tmp/real-extract.img \
+    -device qemu-xhci -device usb-storage,drive=usb,bootindex=0 \
+    -vga std -display vnc=127.0.0.1:1
+```
+
+Connect a VNC client to `127.0.0.1:1`. OVMF enumerates the FAT32 partition,
+loads `EFI/BOOT/BOOTX64.EFI`, and GRUB reads `/boot/grub/grub.cfg` and the
+`/casper` kernel/initrd. On Linux replace `hvf` with `kvm` and point the pflash
+drives at `/usr/share/OVMF/OVMF_CODE.fd` and `OVMF_VARS.fd`; use `-accel tcg`
+when hardware acceleration is unavailable.
+
+## CI smoke test (planned)
+
+The CI job will boot the same image with OVMF in headless mode and assert that
+the installer kernel prints a banner on the serial console within a timeout:
 
 ```console
 $ qemu-system-x86_64 -m 2G -bios /usr/share/ovmf/OVMF.fd \
     -drive file=usb.img,format=raw -serial file:boot.log -display none
 ```
 
-The CI job asserts that the installer kernel prints its banner on the serial
-console within a timeout. A booting GRUB menu alone is not considered success.
+A booting GRUB menu alone is not considered success for CI; the kernel banner is.
+The manual VNC procedure above is enough to verify that the extracted FAT32 tree
+is found by firmware and that GRUB loads.

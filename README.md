@@ -10,6 +10,9 @@ external tools required.
 > analysis, DD-mode writing and UEFI extraction are implemented. GPT, BIOS
 > bootloaders and Windows media are still in progress.
 
+See [ROADMAP.md](ROADMAP.md) for the detailed plan, development setup on another
+machine, and per-milestone acceptance criteria.
+
 ## Features (roadmap)
 
 - [x] Safe device enumeration (USB / SD only, system disks blocked)
