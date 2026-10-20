@@ -7,8 +7,9 @@ ships as a self-contained executable / app bundle: no installer, no runtime, no
 external tools required.
 
 > Status: **pre-alpha** (Phase 0.3 — extraction). Device enumeration, ISO
-> analysis, DD-mode writing and UEFI extraction are implemented. GPT, BIOS
-> bootloaders and Windows media are still in progress.
+> analysis, DD-mode writing and UEFI extraction are implemented; an extracted
+> image boots to a live desktop under QEMU/OVMF. GPT, BIOS bootloaders, Windows
+> media and physical-hardware validation are still in progress.
 
 See [ROADMAP.md](ROADMAP.md) for the detailed plan, development setup on another
 machine, and per-milestone acceptance criteria.

@@ -12,12 +12,16 @@
 
 | Target | Verified by | Status |
 | --- | --- | --- |
-| UEFI x86_64 (OVMF) | QEMU smoke test | phase 0.1 |
-| Legacy BIOS (SeaBIOS) | QEMU smoke test | phase 0.4 |
-| UEFI aarch64 (AAVMF) | QEMU | phase 0.3 |
-| UEFI-only laptop | physical hardware | phase 0.1 |
-| Legacy-only desktop | physical hardware | phase 0.4 |
-| Apple Silicon Mac (UEFI) | physical hardware | phase 0.1 |
+| UEFI x86_64 (OVMF) | QEMU boot, extraction + DD control | **verified 2026-10-20** (live desktop) |
+| Legacy BIOS (SeaBIOS) | QEMU smoke test | extraction not implemented; DD only |
+| UEFI aarch64 (AAVMF) | QEMU | untested (CI build only) |
+| UEFI-only laptop | physical hardware | pending |
+| Legacy-only desktop | physical hardware | pending; DD only |
+| Apple Silicon Mac (UEFI) | physical hardware | pending |
+
+The QEMU/OVMF extraction and DD control run, including screenshots, serial logs
+and hashes, is recorded in
+[validation/uefi-2026-10-20.md](validation/uefi-2026-10-20.md).
 
 ## Verifying a written device without booting
 
@@ -35,7 +39,8 @@ Phase 0.3 extraction has been validated structurally (MBR recognized by macOS,
 FAT32 mounts, `fsck_msdos` clean, file hashes match after read-back). A 3.0 GiB
 Ubuntu derivative extracted to a local image at about 103 MiB/s and verified at
 about 123 MiB/s; all 290 files listed in the ISO's own `md5sum.txt` matched.
-Booting it on real firmware is still on the verification list below.
+The same image boots through OVMF/GRUB to the live desktop in QEMU; physical
+firmware and BIOS boot are still on the verification list.
 
 ## Booting an extracted image in QEMU (UEFI)
 

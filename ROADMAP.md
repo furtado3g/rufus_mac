@@ -1,6 +1,7 @@
 # image2usb roadmap
 
-Status: **pre-alpha, extraction milestone complete**. Last updated: 2026-10-20.
+Status: **pre-alpha, extraction and QEMU/OVMF UEFI boot milestones complete**.
+Last updated: 2026-10-20.
 Main branch: `main` at `a26a9aa`.
 
 This is the working plan for the next milestones. Each milestone lists the goal,
@@ -20,7 +21,7 @@ repository and CI is green.
 | CLI | Done | `list`, `analyze`, `write`; `--mode auto|dd|extract`, `--device`, `--output`, `--yes`, `--dry-run`, `--verify`, `--label` |
 | GUI | Done for DD/extract | egui/eframe, device picker, analysis, progress, Windows-extraction warning |
 | Portable artifacts | Partial | Release workflow drafted; AppImage, signing and notarization pending |
-| UEFI firmware boot | **In progress** | QEMU/OVMF validation started; no boot evidence committed yet |
+| UEFI firmware boot | QEMU/OVMF **verified** | Extraction and DD control reached the live desktop; evidence in `docs/validation/uefi-2026-10-20.md`; physical hardware pending |
 | Physical USB write | Pending | No real USB stick has been written; do not use the connected Expansion HDD |
 | BIOS boot | Not implemented | Only UEFI boot files are copied |
 | Windows media | Not implemented | Rejected with an explicit `Unsupported` error |
@@ -157,27 +158,32 @@ Connect a VNC client to `127.0.0.1:1`. OVMF should load
 
 ## Milestones
 
-### M1 — UEFI boot validation (current)
+### M1 — UEFI boot validation (QEMU/OVMF complete; physical pending)
 
-**Goal:** prove that an extracted image boots on real UEFI firmware, not only
-that it mounts.
+**Goal:** prove that an extracted image boots under UEFI firmware in QEMU/OVMF,
+not only that it mounts. Physical firmware is covered by M7.
 
 **Tasks**
 
-- [ ] Install QEMU + OVMF on macOS (MacPorts preferred on Intel), Linux and
-      optionally Windows.
-- [ ] Boot the 4 GiB image produced from the real Ubuntu derivative.
-- [ ] Capture the GRUB menu and the kernel/initrd loading (screenshot and/or
-      serial log).
-- [ ] Record the host, QEMU/OVMF version, image, commit and result in
-      `docs/validation/`.
-- [ ] If OVMF does not see the partition, test MBR type `0xEF` (ESP) instead of
+- [x] Install QEMU + OVMF on the development host (macOS 15.8 Intel, MacPorts
+      QEMU 11.1.1).
+- [x] Boot the 4 GiB image produced from the real Ubuntu derivative.
+- [x] Capture the GRUB menu and the live desktop (screenshot and serial log).
+- [x] Record the host, QEMU/OVMF version, image, commit and result in
+      `docs/validation/uefi-2026-10-20.md`.
+- [x] If OVMF does not see the partition, test MBR type `0xEF` (ESP) instead of
       `0x0C` and keep the variant that works on both OVMF and real firmware.
-- [ ] Verify that `/boot/grub/grub.cfg` is found and that `/casper/vmlinuz` and
-      `/casper/initrd.gz` are loaded from the FAT32 partition.
+      Not needed: `0x0C` worked.
+- [x] Verify that `/boot/grub/grub.cfg` is found and that `/casper/vmlinuz` and
+      `/casper/initrd.gz` are loaded from the FAT32 partition; the live desktop
+      is the end-to-end proof.
 - [ ] Add a headless Linux CI smoke test with QEMU/TCG and OVMF that asserts a
       kernel banner on the serial console (see "CI smoke test" below).
-- [ ] Update the firmware matrix in `docs/compatibility.md`.
+- [x] Update the firmware matrix in `docs/compatibility.md`.
+
+**Result:** PASS on 2026-10-20. Extraction and a DD control both reached the
+live desktop. Both logs contain the same non-fatal `efi_wrap_10` GRUB warning,
+so it is not an extraction regression.
 
 **Acceptance**
 
@@ -433,7 +439,8 @@ Copy this into `docs/validation/<date>-<firmware>.md`:
 
 ## Suggested immediate order
 
-1. Finish **M1** (UEFI boot validation) and commit the evidence.
+1. **M1** QEMU/OVMF validation is complete; keep physical-hardware testing in
+   M7.
 2. Do **M2** (Rock Ridge symlinks + free-space preflight); this is low-risk and
    improves every distro.
 3. Add **M3** (GPT/ESP) so firmware and future Windows work have a foundation.
