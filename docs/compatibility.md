@@ -32,8 +32,10 @@
    `fsck.vfat -n /dev/sdXN` (Linux).
 
 Phase 0.3 extraction has been validated structurally (MBR recognized by macOS,
-FAT32 mounts, `fsck_msdos` clean, file hashes match after read-back). Booting it
-on real firmware is still on the verification list below.
+FAT32 mounts, `fsck_msdos` clean, file hashes match after read-back). A 3.0 GiB
+Ubuntu derivative extracted to a local image at about 103 MiB/s and verified at
+about 123 MiB/s; all 290 files listed in the ISO's own `md5sum.txt` matched.
+Booting it on real firmware is still on the verification list below.
 
 ## QEMU smoke test (planned for phase 0.1)
 

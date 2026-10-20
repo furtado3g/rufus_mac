@@ -65,6 +65,9 @@ Current limits (Phase 0.3):
 - **MBR + FAT32 only.** GPT and NTFS are rejected with an explicit error.
 - **Linux/BSD distributions only.** Windows installation media needs wimlib and
   split-WIM support, which is not implemented yet.
+- **Rock Ridge symlinks** are copied as empty regular files (the ISO reader does
+  not resolve them yet). Boot files are regular files, so this does not affect
+  UEFI boot, but a few convenience links may be empty.
 - **`--output` is for tests.** Extraction writes into an existing pre-sized file
   of at least `ISO size + 16 MiB` (never less than 64 MiB); create it with
   `mkfile 256m` (macOS) or `truncate -s 256M` (Linux). Writing to a real device
