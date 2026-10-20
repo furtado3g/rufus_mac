@@ -13,6 +13,8 @@
 use std::collections::HashSet;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
+use image2usb_core::{CancelToken, Error, Result as CoreResult};
+
 use crate::partition::PartitionIo;
 
 const DOT: &[u8; 11] = b".          ";
@@ -59,7 +61,8 @@ impl Geometry {
     }
 }
 
-pub fn finalize(disk: &mut PartitionIo<'_>) -> io::Result<()> {
+pub fn finalize(disk: &mut PartitionIo<'_>, cancel: &CancelToken) -> CoreResult<()> {
+    cancel.check()?;
     let geometry = read_geometry(disk)?;
     let mut visited = HashSet::new();
     fix_directory(
@@ -70,12 +73,14 @@ pub fn finalize(disk: &mut PartitionIo<'_>) -> io::Result<()> {
         true,
         true,
         &mut visited,
+        cancel,
     )?;
-    update_fsinfo(disk, &geometry)?;
+    cancel.check()?;
+    update_fsinfo(disk, &geometry, cancel)?;
     Ok(())
 }
 
-fn read_geometry(disk: &mut PartitionIo<'_>) -> io::Result<Geometry> {
+fn read_geometry(disk: &mut PartitionIo<'_>) -> CoreResult<Geometry> {
     let mut bpb = [0u8; 512];
     read_at(disk, 0, &mut bpb)?;
     let bytes_per_sector = u16::from_le_bytes([bpb[11], bpb[12]]) as u64;
@@ -97,11 +102,11 @@ fn read_geometry(disk: &mut PartitionIo<'_>) -> io::Result<Geometry> {
         || total_sectors == 0
         || root_cluster < 2
     {
-        return Err(invalid());
+        return Err(invalid().into());
     }
     let data_start = reserved_sectors + num_fats * fat_sectors;
     if data_start >= total_sectors {
-        return Err(invalid());
+        return Err(invalid().into());
     }
     Ok(Geometry {
         bytes_per_sector,
@@ -125,21 +130,24 @@ fn fix_directory(
     parent_is_root: bool,
     is_root: bool,
     visited: &mut HashSet<u32>,
-) -> io::Result<()> {
+    cancel: &CancelToken,
+) -> CoreResult<()> {
+    cancel.check()?;
     if !visited.insert(cluster) {
         return Ok(());
     }
-    let clusters = chain(disk, geometry, cluster)?;
+    let clusters = chain(disk, geometry, cluster, cancel)?;
     let cluster_size = geometry.cluster_size();
     let total = clusters.len() * cluster_size;
     if total as u64 > MAX_DIR_BYTES {
-        return Err(io::Error::new(
+        return Err(Error::Io(io::Error::new(
             io::ErrorKind::InvalidData,
             "directory is implausibly large",
-        ));
+        )));
     }
     let mut data = vec![0u8; total];
     for (index, &current) in clusters.iter().enumerate() {
+        cancel.check()?;
         let offset = index * cluster_size;
         read_at(
             disk,
@@ -150,7 +158,7 @@ fn fix_directory(
 
     let mut entries = parse_entries(&data);
     if is_root {
-        recurse_children(disk, geometry, &entries, cluster, visited)?;
+        recurse_children(disk, geometry, &entries, cluster, visited, cancel)?;
         return Ok(());
     }
 
@@ -227,7 +235,7 @@ fn fix_directory(
         )?;
     }
 
-    recurse_children(disk, geometry, &entries, cluster, visited)
+    recurse_children(disk, geometry, &entries, cluster, visited, cancel)
 }
 
 fn recurse_children(
@@ -236,8 +244,10 @@ fn recurse_children(
     entries: &[[u8; 32]],
     parent: u32,
     visited: &mut HashSet<u32>,
-) -> io::Result<()> {
+    cancel: &CancelToken,
+) -> CoreResult<()> {
     for entry in entries {
+        cancel.check()?;
         if entry[0] == END || entry[0] == DELETED || entry[0] == 0 {
             continue;
         }
@@ -257,6 +267,7 @@ fn recurse_children(
                 parent == geometry.root_cluster,
                 false,
                 visited,
+                cancel,
             )?;
         }
     }
@@ -282,17 +293,23 @@ fn set_cluster(entry: &mut [u8; 32], cluster: u32) {
     entry[20..22].copy_from_slice(&((cluster >> 16) as u16).to_le_bytes());
 }
 
-fn chain(disk: &mut PartitionIo<'_>, geometry: &Geometry, start: u32) -> io::Result<Vec<u32>> {
+fn chain(
+    disk: &mut PartitionIo<'_>,
+    geometry: &Geometry,
+    start: u32,
+    cancel: &CancelToken,
+) -> CoreResult<Vec<u32>> {
     let mut out = Vec::new();
     let mut current = start;
     let max = (geometry.cluster_count() + 2).min(u32::MAX as u64) as u32;
     let mut buffer = [0u8; 4];
     while (2..max).contains(&current) {
+        cancel.check()?;
         if out.len() as u64 > max as u64 {
-            return Err(io::Error::new(
+            return Err(Error::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "FAT32 cluster chain loops",
-            ));
+            )));
         }
         out.push(current);
         read_at(
@@ -309,13 +326,18 @@ fn chain(disk: &mut PartitionIo<'_>, geometry: &Geometry, start: u32) -> io::Res
     Ok(out)
 }
 
-fn update_fsinfo(disk: &mut PartitionIo<'_>, geometry: &Geometry) -> io::Result<()> {
+fn update_fsinfo(
+    disk: &mut PartitionIo<'_>,
+    geometry: &Geometry,
+    cancel: &CancelToken,
+) -> CoreResult<()> {
     let count = geometry.cluster_count();
     let mut free = 0u32;
     let mut next_free = 0xFFFF_FFFFu32;
     let mut buffer = vec![0u8; 256 * 1024];
     let mut cluster = 2u64;
     while cluster < count + 2 {
+        cancel.check()?;
         let entries = ((count + 2 - cluster) as usize).min(buffer.len() / 4);
         let offset = geometry.fat_offset() + cluster * 4;
         let bytes = entries * 4;
@@ -374,8 +396,21 @@ fn write_at<T: Write + Seek>(disk: &mut T, offset: u64, buffer: &[u8]) -> io::Re
 mod tests {
     use super::*;
     use fatfs::{FileSystem, FormatVolumeOptions, FsOptions};
-    use image2usb_core::FileDevice;
+    use image2usb_core::{CancelToken, FileDevice};
     use std::io::{Seek, SeekFrom};
+
+    #[test]
+    fn finalize_stops_when_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("volume.img");
+        std::fs::write(&path, vec![0u8; 64 * 1024 * 1024]).unwrap();
+        let mut device = FileDevice::open(&path).unwrap();
+        let mut part = PartitionIo::new(&mut device, 0, 64 * 1024 * 1024);
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let err = finalize(&mut part, &cancel).unwrap_err();
+        assert!(matches!(err, Error::Cancelled));
+    }
 
     #[test]
     fn rewrites_dot_entries_and_fsinfo() {
@@ -396,7 +431,7 @@ mod tests {
             fs.root_dir().create_dir("a/b").unwrap();
             drop(fs);
             part.flush().unwrap();
-            finalize(&mut part).unwrap();
+            finalize(&mut part, &CancelToken::new()).unwrap();
             part.flush().unwrap();
             // Mount again: the rewritten directories must still be readable.
             part.seek(SeekFrom::Start(0)).unwrap();

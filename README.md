@@ -69,12 +69,18 @@ Current limits (M2):
 - **MBR + FAT32 only.** GPT and NTFS are rejected with an explicit error.
 - **Linux/BSD distributions only.** Windows installation media needs wimlib and
   split-WIM support, which is not implemented yet.
+- **UDF-only images are rejected.** Hybrid ISO/UDF images are extracted from
+  their ISO 9660/Joliet tree with a warning; UDF-only media needs DD mode or a
+  future UDF reader.
 - **Rock Ridge symlinks** are detected from direct `SL` entries and from SUSP
   `CE` continuation areas, then skipped with a warning because FAT32 has no
   symlinks. Use DD mode if a boot path depends on a symlink.
 - **Space is checked before the MBR is touched.** Extraction estimates the FAT32
   data area, directory-entry slots and long-file-name overhead and rejects a
   target that is too small with an explicit error.
+- **4Kn and Unicode names:** file-backed 4 KiB logical-sector targets are tested,
+  and FAT names are normalized to NFC and sanitized for reserved names, trailing
+  dots/spaces and case-only collisions.
 - **`--output` is for tests.** Extraction writes into an existing pre-sized file
   of at least `ISO size + 16 MiB` (never less than 64 MiB); create it with
   `mkfile 256m` (macOS) or `truncate -s 256M` (Linux). Writing to a real device

@@ -125,6 +125,11 @@ pub fn read_volume_descriptors(file: &mut File, size: u64) -> Result<VolumeDescr
     }
 
     if out.primary.is_none() {
+        if out.has_udf {
+            return Err(IsoError::NotIso(
+                "image is UDF-only; extraction supports ISO 9660/Joliet only".to_owned(),
+            ));
+        }
         return Err(IsoError::NotIso(
             "no ISO 9660 primary volume descriptor at sector 16".to_owned(),
         ));

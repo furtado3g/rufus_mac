@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use unicode_normalization::UnicodeNormalization;
+
 pub struct NameMap {
     used: HashSet<String>,
     /// Source directory path -> destination directory path.
@@ -77,8 +79,9 @@ fn sanitize_path(path: &str) -> String {
 }
 
 pub fn sanitize_component(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    for ch in name.chars() {
+    let normalized: String = name.nfc().collect();
+    let mut out = String::with_capacity(normalized.len());
+    for ch in normalized.chars() {
         let ch = match ch {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
             c if c.is_control() => '_',
@@ -136,6 +139,9 @@ mod tests {
         assert_eq!(sanitize_component("com1.txt"), "_com1.txt");
         assert_eq!(sanitize_component("trailing.  "), "trailing");
         assert_eq!(sanitize_component("..."), "_");
+        assert_eq!(sanitize_component("Cafe\u{301}"), "Café");
+        let long = "a".repeat(400);
+        assert_eq!(sanitize_component(&long).chars().count(), 120);
     }
 
     #[test]

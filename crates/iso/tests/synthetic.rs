@@ -58,6 +58,20 @@ fn non_hybrid_image_requires_extraction() {
 }
 
 #[test]
+fn rejects_udf_only_images_with_a_clear_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("udf.iso");
+    let mut data = vec![0u8; 128 * 2048];
+    data[16 * 2048 + 1..16 * 2048 + 6].copy_from_slice(b"BEA01");
+    data[17 * 2048 + 1..17 * 2048 + 6].copy_from_slice(b"NSR02");
+    data[18 * 2048 + 1..18 * 2048 + 6].copy_from_slice(b"TEA01");
+    std::fs::write(&path, data).unwrap();
+
+    let err = analyze_path(&path).unwrap_err().to_string();
+    assert!(err.contains("UDF-only"), "{err}");
+}
+
+#[test]
 fn rejects_non_iso_files() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("not.iso");

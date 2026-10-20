@@ -246,7 +246,7 @@ pub fn extract_image(
         Phase::Finalizing,
         "finalizing FAT32 metadata",
     ));
-    crate::postprocess::finalize(&mut part).map_err(Error::Io)?;
+    crate::postprocess::finalize(&mut part, cancel)?;
     part.flush().map_err(Error::Io)?;
     cancel.check()?;
     drop(part);

@@ -158,6 +158,173 @@ fn rejects_too_large_tree_before_mbr_write() {
 }
 
 #[test]
+fn cancelled_extraction_does_not_touch_the_device() {
+    let dir = tempfile::tempdir().unwrap();
+    let iso = dir.path().join("test.iso");
+    build_image(&iso, 0xEF, true);
+    let info = analyze_path(&iso).unwrap();
+
+    let disk = dir.path().join("disk.img");
+    std::fs::write(&disk, vec![0u8; 96 * 1024 * 1024]).unwrap();
+    let mut device = FileDevice::open(&disk).unwrap();
+    let cancel = CancelToken::new();
+    cancel.cancel();
+
+    let err = extract_image(
+        &iso,
+        &info,
+        &mut device,
+        &WriteOptions::default(),
+        &cancel,
+        &NoopSink,
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::Cancelled), "{err}");
+
+    let mut mbr = [0u8; 512];
+    device.read_exact_at(0, &mut mbr).unwrap();
+    assert_eq!(mbr, [0u8; 512]);
+}
+
+#[test]
+fn extracted_fat32_passes_platform_fsck() {
+    let dir = tempfile::tempdir().unwrap();
+    let iso = dir.path().join("test.iso");
+    build_image(&iso, 0xEF, true);
+    let info = analyze_path(&iso).unwrap();
+
+    let disk = dir.path().join("disk.img");
+    std::fs::write(&disk, vec![0u8; 96 * 1024 * 1024]).unwrap();
+    let mut device = FileDevice::open(&disk).unwrap();
+    let layout = plan_layout(device.size(), device.logical_sector_size()).unwrap();
+    extract_image(
+        &iso,
+        &info,
+        &mut device,
+        &WriteOptions::default(),
+        &CancelToken::new(),
+        &NoopSink,
+    )
+    .unwrap();
+
+    let fsck = if cfg!(target_os = "macos") {
+        "fsck_msdos"
+    } else if cfg!(target_os = "linux") {
+        "fsck.vfat"
+    } else {
+        return;
+    };
+
+    // fsck wants the partition, not the whole disk with its MBR.
+    let image = std::fs::read(&disk).unwrap();
+    let partition = &image[layout.start_byte as usize..layout.end_byte() as usize];
+    let part_path = dir.path().join("partition.img");
+    std::fs::write(&part_path, partition).unwrap();
+
+    let output = match std::process::Command::new(fsck)
+        .arg("-n")
+        .arg(&part_path)
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+        Err(err) => panic!("failed to run {fsck}: {err}"),
+    };
+    assert!(
+        output.status.success(),
+        "{fsck} failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn extracts_with_4k_logical_sectors() {
+    let dir = tempfile::tempdir().unwrap();
+    let iso = dir.path().join("test.iso");
+    build_image(&iso, 0xEF, true);
+    let info = analyze_path(&iso).unwrap();
+
+    let disk = dir.path().join("disk.img");
+    std::fs::write(&disk, vec![0u8; 96 * 1024 * 1024]).unwrap();
+    let mut device = SectorDevice {
+        inner: FileDevice::open(&disk).unwrap(),
+        sector: 4096,
+    };
+    let layout = plan_layout(device.size(), device.logical_sector_size()).unwrap();
+    assert_eq!(layout.start_lba, 256);
+    assert_eq!(layout.sector_size, 4096);
+    assert_eq!(layout.len % 4096, 0);
+
+    let stats = extract_image(
+        &iso,
+        &info,
+        &mut device,
+        &WriteOptions::default(),
+        &CancelToken::new(),
+        &NoopSink,
+    )
+    .unwrap();
+    assert_eq!(stats.files, 3);
+
+    let entries = list_extracted(&mut device, &layout).unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|(path, _)| path == "EFI/BOOT/BOOTX64.EFI")
+    );
+    assert_eq!(
+        read_extracted(&mut device, &layout, "EFI/BOOT/BOOTX64.EFI").unwrap(),
+        EFI_BOOT
+    );
+
+    let mut first_sector = vec![0u8; 4096];
+    device.read_exact_at(0, &mut first_sector).unwrap();
+    assert_eq!(&first_sector[510..512], &[0x55, 0xAA]);
+    assert_eq!(first_sector[446 + 4], 0x0C);
+    assert_eq!(
+        u32::from_le_bytes(first_sector[446 + 8..446 + 12].try_into().unwrap()),
+        256
+    );
+    assert!(first_sector[512..].iter().all(|byte| *byte == 0));
+}
+
+struct SectorDevice {
+    inner: FileDevice,
+    sector: u32,
+}
+
+impl RawIo for SectorDevice {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> image2usb_core::Result<usize> {
+        self.inner.read_at(offset, buf)
+    }
+
+    fn write_at(&mut self, offset: u64, buf: &[u8]) -> image2usb_core::Result<usize> {
+        self.inner.write_at(offset, buf)
+    }
+
+    fn size(&self) -> u64 {
+        self.inner.size()
+    }
+
+    fn logical_sector_size(&self) -> u32 {
+        self.sector
+    }
+
+    fn physical_sector_size(&self) -> u32 {
+        self.sector
+    }
+
+    fn sync(&mut self) -> image2usb_core::Result<()> {
+        self.inner.sync()
+    }
+
+    fn invalidate(&mut self) -> image2usb_core::Result<()> {
+        self.inner.invalidate()
+    }
+}
+
+#[test]
 fn rejects_windows_media_before_touching_the_device() {
     // The fixture is not Windows media, so this only checks that a non-FAT32
     // filesystem is refused before any write happens.
