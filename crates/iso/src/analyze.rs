@@ -298,6 +298,13 @@ fn detect_distro(
     if has_dir(tree, "arch") || find(tree, "arch/version").is_some() {
         return Ok((Distro::Arch, None));
     }
+    if find(tree, ".discinfo").is_some()
+        && (find(tree, "images/pxeboot/vmlinuz").is_some()
+            || find(tree, "Fedora-Legal-README.txt").is_some()
+            || find(tree, "images/install.img").is_some())
+    {
+        return Ok((Distro::Fedora, None));
+    }
     if find(tree, ".treeinfo").is_some() {
         if let Some(entry) = find(tree, ".treeinfo")
             && let Ok(bytes) = read_file(file, entry.extent, entry.size, 4096)

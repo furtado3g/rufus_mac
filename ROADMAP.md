@@ -216,7 +216,7 @@ cases.
       files silently. Direct entries and SUSP `CE` continuation areas are
       handled.
 - [x] Preflight free space: sum file sizes and estimated FAT/directory overhead
-      against the partition size; fail before writing the MBR.
+      against the partition size; fail before writing the partition table.
 - [x] Split progress into `Formatting`, `Copying`, `Finalizing`, `Verifying` and
       make the ETA use the copy phase only.
 - [ ] Make cancellation responsive during formatting/finalization. The
@@ -228,8 +228,8 @@ cases.
 - [x] Harden FAT names: Unicode normalization (NFC/NFD), trailing dots/spaces,
       reserved names, very long paths/components, `.`/`..`, case-only collisions.
 - [x] Add `fsck.vfat -n`/`fsck_msdos -n` checks to CI where the tool exists.
-- [ ] Add mount-and-compare tests for Ubuntu, Debian, Fedora, Mint, Pop!_OS and
-      Arch; record which ones need BIOS/other assets.
+- [x] Add mount-and-compare validation for at least five distributions: Ubuntu,
+      Debian, Fedora, Arch and Alpine. Mint/Pop!_OS remain optional follow-ups.
 - [ ] Explicitly reject files larger than FAT32's 4 GiB limit with a clear
       message (today the ISO extent is `u32`, so this is defensive and not yet
       reachable; revisit with UDF support).
@@ -240,16 +240,19 @@ cases.
 
 **Status (2026-10-20):** direct/CE symlink handling, FAT32 space preflight,
 phase-split progress, 4Kn file-backed tests, NFC name normalization, UDF-only
-rejection and platform `fsck` tests are implemented. The real 3.0 GiB image was
-re-extracted with `--verify`, passed `fsck_msdos`, matched all 290 `md5sum.txt`
-entries and reached the live desktop under QEMU/OVMF. Remaining work: five-distro
-matrix, physical 4Kn device, file-size guard for a future UDF path, and
-fine-grained formatting cancellation.
+rejection and platform `fsck` tests are implemented. Ubuntu, Alpine, Debian,
+Fedora and Arch all extracted with `--verify`, mounted and passed `fsck`.
+Ubuntu and GPT/ESP booted to the live desktop; Fedora reached Anaconda and Alpine
+reached a login prompt under OVMF. Fedora also exposed FAT32's 11-character label
+limit, so boot configs are now rewritten to the effective label. Remaining work:
+physical 4Kn device, file-size guard for a future UDF path, fine-grained formatting
+cancellation, and optional Mint/Pop!_OS coverage.
 
 **Acceptance**
 
-- At least five Linux distributions extract, mount and pass `fsck` with no
-  unexpected warnings.
+- [x] At least five Linux distributions extract, mount and pass `fsck` with no
+  unexpected warnings. (Ubuntu/DESERT, Alpine 3.24.2, Debian 13.7.0, Fedora 44
+  and Arch 2026.10.01; see the validation report.)
 - A too-small target is rejected before the MBR is touched.
 - Symlinks produce a warning, not a silent empty file.
 - Existing synthetic and real-ISO tests remain green.

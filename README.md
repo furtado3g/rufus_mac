@@ -76,6 +76,10 @@ Current limits (M3):
 - **UDF-only images are rejected.** Hybrid ISO/UDF images are extracted from
   their ISO 9660/Joliet tree with a warning; UDF-only media needs DD mode or a
   future UDF reader.
+- **FAT32 labels are limited to 11 characters.** When the ISO volume ID is
+  longer, extraction rewrites `LABEL=` and GRUB `search` references in boot
+  configuration files to the actual FAT label (for example Fedora's
+  `Fedora-E-dvd-x86_64-44` becomes `FEDORA-E-DV`).
 - **Rock Ridge symlinks** are detected from direct `SL` entries and from SUSP
   `CE` continuation areas, then skipped with a warning because FAT32 has no
   symlinks. Use DD mode if a boot path depends on a symlink.

@@ -7,11 +7,11 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use fatfs::{FatType, FileSystem, FormatVolumeOptions, FsOptions};
+use fatfs::{FatType, FileSystem, FormatVolumeOptions, FsOptions, ReadWriteSeek};
 use image2usb_core::{
     CancelToken, Error, FileSystem as FilesystemKind, PartitionScheme, Phase, ProgressEvent,
     ProgressSink, RawIo, Result, VerifyMode, WriteOptions, util::format_bytes,
@@ -244,6 +244,29 @@ pub fn extract_image(
             started,
             Some("files copied"),
         ));
+        let source_label = info.volume_id.as_deref().unwrap_or("IMAGE2USB");
+        let target_label = String::from_utf8_lossy(&fat_label(extraction_label(options, info)))
+            .trim_end()
+            .to_owned();
+        if !source_label.eq_ignore_ascii_case(&target_label) {
+            let changed =
+                rewrite_boot_config_labels(&root_dir, &manifest, source_label, &target_label)
+                    .map_err(|err| fat_error("boot config", err))?;
+            for path in changed {
+                if let Some(entry) = manifest.iter_mut().find(|entry| entry.path == path) {
+                    let mut file = root_dir
+                        .open_file(&entry.path)
+                        .map_err(|err| fat_error(&entry.path, err))?;
+                    let mut data = Vec::new();
+                    file.read_to_end(&mut data)
+                        .map_err(|err| fat_error(&entry.path, err))?;
+                    entry.size = data.len() as u64;
+                    if options.verify == VerifyMode::Sha256 {
+                        entry.sha256 = Some(Sha256::digest(&data).into());
+                    }
+                }
+            }
+        }
         drop(root_dir);
         drop(fs);
         (manifest, directories, copied)
@@ -400,11 +423,7 @@ fn format_fat32(
             "partition larger than 2 TiB cannot be FAT32".to_owned(),
         ));
     }
-    let label = if options.label.trim().is_empty() {
-        info.volume_id.as_deref().unwrap_or("IMAGE2USB")
-    } else {
-        &options.label
-    };
+    let label = extraction_label(options, info);
     let mut opts = FormatVolumeOptions::new()
         .fat_type(FatType::Fat32)
         .bytes_per_sector(512)
@@ -525,6 +544,91 @@ fn progress(
         eta,
         message: message.map(str::to_owned),
     }
+}
+
+fn extraction_label<'a>(options: &'a WriteOptions, info: &'a IsoInfo) -> &'a str {
+    if options.label.trim().is_empty() {
+        info.volume_id.as_deref().unwrap_or("IMAGE2USB")
+    } else {
+        &options.label
+    }
+}
+
+/// Rewrite bootloader configuration files that refer to the ISO volume ID.
+/// FAT32 volume labels are limited to 11 characters, so a long ISO label such
+/// as Fedora's is stored truncated. GRUB and the installer both search for the
+/// original label unless the config is updated to the actual FAT label.
+fn rewrite_boot_config_labels<T: ReadWriteSeek>(
+    root: &fatfs::Dir<'_, T>,
+    manifest: &[ManifestEntry],
+    source: &str,
+    target: &str,
+) -> io::Result<Vec<String>> {
+    if source.is_empty() || source.eq_ignore_ascii_case(target) {
+        return Ok(Vec::new());
+    }
+    let mut changed = Vec::new();
+    for entry in manifest.iter().filter(|entry| is_boot_config(&entry.path)) {
+        if entry.size > 2 * 1024 * 1024 {
+            continue;
+        }
+        let mut file = root.open_file(&entry.path)?;
+        let mut data = Vec::new();
+        file.read_to_end(&mut data)?;
+        let Ok(text) = String::from_utf8(data) else {
+            continue;
+        };
+        let replaced = replace_ascii_case_insensitive(&text, source, target);
+        if replaced == text {
+            continue;
+        }
+        file.seek(SeekFrom::Start(0))?;
+        file.truncate()?;
+        file.write_all(replaced.as_bytes())?;
+        file.flush()?;
+        changed.push(entry.path.clone());
+    }
+    Ok(changed)
+}
+
+fn is_boot_config(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    matches!(
+        path.as_str(),
+        "efi/boot/grub.cfg"
+            | "efi/boot/boot.conf"
+            | "boot/grub/grub.cfg"
+            | "boot/grub2/grub.cfg"
+            | "boot/grub/loopback.cfg"
+            | "isolinux/isolinux.cfg"
+            | "syslinux/syslinux.cfg"
+            | "isolinux.cfg"
+            | "syslinux.cfg"
+    ) || (path.starts_with("loader/entries/") && path.ends_with(".conf"))
+        || (path.starts_with("boot/loader/entries/") && path.ends_with(".conf"))
+}
+
+fn replace_ascii_case_insensitive(text: &str, needle: &str, replacement: &str) -> String {
+    let haystack = text.as_bytes();
+    let needle = needle.as_bytes();
+    if needle.is_empty() {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < haystack.len() {
+        if index + needle.len() <= haystack.len()
+            && haystack[index..index + needle.len()].eq_ignore_ascii_case(needle)
+        {
+            out.push_str(replacement);
+            index += needle.len();
+        } else {
+            let ch = text[index..].chars().next().expect("valid char boundary");
+            out.push(ch);
+            index += ch.len_utf8();
+        }
+    }
+    out
 }
 
 fn fat_label(label: &str) -> [u8; 11] {
@@ -686,6 +790,24 @@ mod tests {
         }];
         let err = check_extraction_space(&entries, &layout, &WriteOptions::default()).unwrap_err();
         assert!(matches!(err, Error::ExtractionTooLarge { .. }), "{err}");
+    }
+
+    #[test]
+    fn rewrites_long_iso_labels_case_insensitively() {
+        let text = "search -l 'Fedora-E-dvd-x86_64-44'\nlinux /vmlinuz inst.stage2=hd:LABEL=fedora-e-dvd-x86_64-44";
+        let rewritten =
+            replace_ascii_case_insensitive(text, "Fedora-E-dvd-x86_64-44", "FEDORA-E-DV");
+        assert!(!rewritten.contains("dvd-x86_64"));
+        assert_eq!(rewritten.matches("FEDORA-E-DV").count(), 2);
+    }
+
+    #[test]
+    fn recognizes_bootloader_configs() {
+        assert!(is_boot_config("EFI/BOOT/grub.cfg"));
+        assert!(is_boot_config("boot/grub2/grub.cfg"));
+        assert!(is_boot_config("isolinux/isolinux.cfg"));
+        assert!(is_boot_config("loader/entries/archiso-x86_64.conf"));
+        assert!(!is_boot_config("etc/fstab.conf"));
     }
 
     #[test]

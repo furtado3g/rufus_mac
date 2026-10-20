@@ -41,8 +41,13 @@ hashes match after read-back). A 3.0 GiB Ubuntu derivative extracted to a local
 image at about 103 MiB/s and verified at about 123 MiB/s; all 290 files listed in
 the ISO's own `md5sum.txt` matched. The M2 re-extraction also matched 290/290
 files, passed `fsck_msdos`, and booted through OVMF/GRUB to the live desktop in
-QEMU. A GPT/ESP extraction (`--scheme gpt`) did the same. Physical firmware and
-BIOS boot are still on the verification list.
+QEMU. A GPT/ESP extraction (`--scheme gpt`) did the same. A five-distribution matrix
+(Ubuntu/DESERT, Alpine 3.24.2, Debian 13.7.0, Fedora 44 and Arch 2026.10.01)
+also extracted, mounted and passed `fsck`; Fedora reached Anaconda and Alpine
+reached a login prompt under OVMF. Long ISO labels are rewritten to FAT32's
+11-character label in boot configs (Fedora's `Fedora-E-dvd-x86_64-44` becomes
+`FEDORA-E-DV`). Physical firmware and BIOS boot are still on the verification
+list.
 
 ## Booting an extracted image in QEMU (UEFI)
 
