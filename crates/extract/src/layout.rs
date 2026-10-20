@@ -1,9 +1,10 @@
 //! Partition layout and MBR generation for extraction mode.
 //!
-//! Phase 0.3 writes a single MBR partition of type `0x0C` (FAT32 LBA). UEFI
-//! firmware on removable media scans every FAT partition for
-//! `\EFI\BOOT\BOOT<arch>.EFI`, so no GPT or ESP type is required. GPT support
-//! and a BIOS boot record are planned for the next phase.
+//! MBR mode writes a single type `0x0C` (FAT32 LBA) partition. UEFI firmware on
+//! removable media scans every FAT partition for `\EFI\BOOT\BOOT<arch>.EFI`, so
+//! the ESP type is not required for booting, but GPT mode provides it anyway.
+//! GPT generation lives in `gpt.rs`; a BIOS boot record is planned for the next
+//! phase.
 
 use image2usb_core::{Error, RawIo, Result};
 
@@ -35,6 +36,10 @@ impl PartitionLayout {
     pub fn end_byte(&self) -> u64 {
         self.start_byte + self.len
     }
+
+    pub fn end_lba(&self) -> u64 {
+        u64::from(self.start_lba) + u64::from(self.sectors) - 1
+    }
 }
 
 pub fn plan_layout(device_size: u64, sector_size: u32) -> Result<PartitionLayout> {
@@ -51,7 +56,7 @@ pub fn plan_layout(device_size: u64, sector_size: u32) -> Result<PartitionLayout
     let sectors = len / sector_size;
     if sectors > u32::MAX as u64 {
         return Err(Error::Unsupported(
-            "partition larger than 2 TiB requires GPT, which is not implemented yet".to_owned(),
+            "FAT32 partitions larger than 2 TiB are not supported".to_owned(),
         ));
     }
     Ok(PartitionLayout {

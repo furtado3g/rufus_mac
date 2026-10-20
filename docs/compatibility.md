@@ -35,13 +35,14 @@ and hashes, is recorded in
 4. Check the generated FAT32 volume with `fsck_msdos -n /dev/rdiskN` (macOS) or
    `fsck.vfat -n /dev/sdXN` (Linux).
 
-Extraction has been validated structurally (MBR recognized by macOS, FAT32
-mounts, `fsck_msdos` clean, file hashes match after read-back). A 3.0 GiB Ubuntu
-derivative extracted to a local image at about 103 MiB/s and verified at about
-123 MiB/s; all 290 files listed in the ISO's own `md5sum.txt` matched. The M2
-re-extraction also matched 290/290 files, passed `fsck_msdos`, and booted through
-OVMF/GRUB to the live desktop in QEMU. Physical firmware and BIOS boot are still
-on the verification list.
+Extraction has been validated structurally with both MBR and GPT/ESP (macOS
+recognizes the table and mounts the FAT32 volume, `fsck_msdos` is clean, and file
+hashes match after read-back). A 3.0 GiB Ubuntu derivative extracted to a local
+image at about 103 MiB/s and verified at about 123 MiB/s; all 290 files listed in
+the ISO's own `md5sum.txt` matched. The M2 re-extraction also matched 290/290
+files, passed `fsck_msdos`, and booted through OVMF/GRUB to the live desktop in
+QEMU. A GPT/ESP extraction (`--scheme gpt`) did the same. Physical firmware and
+BIOS boot are still on the verification list.
 
 ## Booting an extracted image in QEMU (UEFI)
 

@@ -1,6 +1,6 @@
 # image2usb roadmap
 
-Status: **pre-alpha, UEFI boot validated; M2 extraction hardening in progress**.
+Status: **pre-alpha, UEFI boot validated; M2 extraction hardening and M3 GPT/ESP implemented**.
 Last updated: 2026-10-20.
 Main branch: `main` (see `git log`).
 
@@ -17,15 +17,16 @@ repository and CI is green.
 | Device safety | Done | USB/SD only, system disk refused, identity rechecked, explicit confirmation, failing offset reported |
 | ISO analysis | Done | ISO 9660, Joliet, Rock Ridge names, El Torito, hybrid MBR/GPT, distro markers |
 | DD mode | Done | 4 MiB chunks, progress, cancel, SHA-256 verify |
-| Extraction | MBR + FAT32, UEFI | Real 3.0 GiB Ubuntu derivative: space preflight, `fsck_msdos` clean, 290/290 `md5sum.txt` matches, live desktop; 4Kn file-backed test and platform `fsck` test |
-| CLI | Done | `list`, `analyze`, `write`; `--mode auto|dd|extract`, `--device`, `--output`, `--yes`, `--dry-run`, `--verify`, `--label` |
+| Extraction | MBR/GPT + FAT32, UEFI | Real 3.0 GiB Ubuntu derivative: space preflight, `fsck_msdos` clean, 290/290 `md5sum.txt` matches, live desktop; MBR and GPT/ESP both boot; 4Kn file-backed and platform `fsck` tests |
+| CLI | Done | `list`, `analyze`, `write`; `--mode auto|dd|extract`, `--scheme mbr|gpt`, `--device`, `--output`, `--yes`, `--dry-run`, `--verify`, `--label` |
 | GUI | Done for DD/extract | egui/eframe, device picker, analysis, progress, Windows-extraction warning |
 | Portable artifacts | Partial | Release workflow drafted; AppImage, signing and notarization pending |
 | UEFI firmware boot | QEMU/OVMF **verified** | Extraction and DD control reached the live desktop; evidence in `docs/validation/uefi-2026-10-20.md`; physical hardware pending |
 | Physical USB write | Pending | No real USB stick has been written; do not use the connected Expansion HDD |
 | BIOS boot | Not implemented | Only UEFI boot files are copied |
 | Windows media | Not implemented | Rejected with an explicit `Unsupported` error |
-| GPT / NTFS | Not implemented | MBR + FAT32 only |
+| GPT extraction | Done (single ESP) | `--scheme gpt`, protective MBR, primary/backup headers, CRC32, diskutil and OVMF validation |
+| NTFS / second data partition | Not implemented | Single FAT32 ESP only; large-tree split is deferred |
 | ARM64 targets | CI only | Windows ARM64 and Linux ARM64 paths not locally validated |
 | Rock Ridge symlinks | Done (skip) | Direct `SL` and SUSP `CE` targets detected; symlinks skipped with a warning because FAT32 has none |
 
@@ -259,23 +260,31 @@ fine-grained formatting cancellation.
 
 **Tasks**
 
-- [ ] Add `PartitionScheme::Gpt` to the plan and CLI/GUI (`--scheme gpt`).
-- [ ] Write a protective MBR, primary GPT header, 128-entry partition array,
+- [x] Add `PartitionScheme::Gpt` to the plan and CLI/GUI (`--scheme gpt`).
+- [x] Write a protective MBR, primary GPT header, 128-entry partition array,
       backup GPT at the end, correct CRC32s and 1 MiB alignment.
-- [ ] Create one FAT32 ESP with type GUID
+- [x] Create one FAT32 ESP with type GUID
       `C12A7328-F81F-11D2-BA4B-00A0C93EC93B`; keep the volume label option.
-- [ ] Decide whether a second data partition is needed for large trees; if not,
-      document the single-ESP layout.
+- [x] Decide whether a second data partition is needed for large trees; if not,
+      document the single-ESP layout. (Single ESP for now; documented in the
+      extraction module and README.)
 - [ ] Validate with `sgdisk --verify`, `gdisk`, `parted`, macOS `diskutil` and
-      QEMU OVMF.
-- [ ] Preserve MBR as the default until GPT has equivalent test coverage.
-- [ ] Add extraction tests for GPT and a QEMU boot test.
+      QEMU OVMF. `diskutil` and QEMU pass; the `sgdisk --verify` test runs in CI
+      when `gdisk` is installed. `gdisk`/`parted` manual checks are still open.
+- [x] Preserve MBR as the default until GPT has equivalent test coverage.
+- [x] Add extraction tests for GPT and a QEMU boot test.
 
 **Acceptance**
 
-- `sgdisk --verify` reports no errors.
-- The ESP mounts on macOS/Linux and boots under OVMF.
-- MBR extraction is unchanged and still default.
+- `sgdisk --verify` reports no errors. (CI test installed with `gdisk`; local
+  macOS does not have `sgdisk`.)
+- The ESP mounts on macOS/Linux and boots under OVMF. (macOS diskutil mount and
+  OVMF live desktop verified; Linux fsck covered by the platform test.)
+- MBR extraction is unchanged and still default. (Existing MBR tests pass.)
+
+**Status (2026-10-20):** implementation and real-image validation are complete
+for the single-ESP layout. A later iteration can add a second data partition or
+NTFS if large-tree support needs it.
 
 ### M4 — BIOS boot support
 
@@ -458,7 +467,8 @@ Copy this into `docs/validation/<date>-<firmware>.md`:
 2. Finish the remaining **M2** hardening (multi-distro mount/compare and
    fine-grained formatting cancellation). Symlinks, free-space preflight, 4Kn
    file-backed tests, FAT name edge cases and CI `fsck` are already implemented.
-3. Add **M3** (GPT/ESP) so firmware and future Windows work have a foundation.
+3. **M3** (GPT/ESP) is implemented and boot-tested; finish optional `gdisk`/`parted`
+   checks before calling it fully closed.
 4. Choose between **M4** (BIOS) and **M5** (Windows) based on user demand; BIOS
    is smaller, Windows is the larger Rufus parity gap.
 5. Finish **M6** once the feature set is stable; signing credentials are the

@@ -1,7 +1,11 @@
 //! End-to-end extraction against the synthetic ISO fixture.
 
-use image2usb_core::{CancelToken, Error, FileDevice, NoopSink, RawIo, VerifyMode, WriteOptions};
-use image2usb_extract::{extract_image, list_extracted, plan_layout, preview, read_extracted};
+use image2usb_core::{
+    CancelToken, Error, FileDevice, NoopSink, PartitionScheme, RawIo, VerifyMode, WriteOptions,
+};
+use image2usb_extract::{
+    extract_image, list_extracted, plan_gpt_layout, plan_layout, preview, read_extracted,
+};
 use image2usb_iso::analyze_path;
 use image2usb_testiso::{
     DISK_INFO, EFI_BOOT, ISOLINUX_CFG, build_image, build_image_with_large_file,
@@ -155,6 +159,73 @@ fn rejects_too_large_tree_before_mbr_write() {
     let mut mbr = [0u8; 512];
     device.read_exact_at(0, &mut mbr).unwrap();
     assert_eq!(mbr, [0u8; 512]);
+}
+
+#[test]
+fn extracts_gpt_esp_with_uefi_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let iso = dir.path().join("test.iso");
+    build_image(&iso, 0xEF, true);
+    let info = analyze_path(&iso).unwrap();
+
+    let disk = dir.path().join("disk.img");
+    std::fs::write(&disk, vec![0u8; 96 * 1024 * 1024]).unwrap();
+    let mut device = FileDevice::open(&disk).unwrap();
+    let gpt = plan_gpt_layout(device.size(), device.logical_sector_size()).unwrap();
+    let options = WriteOptions {
+        scheme: PartitionScheme::Gpt,
+        ..WriteOptions::default()
+    };
+
+    let stats = extract_image(
+        &iso,
+        &info,
+        &mut device,
+        &options,
+        &CancelToken::new(),
+        &NoopSink,
+    )
+    .unwrap();
+    assert_eq!(stats.files, 3);
+    assert_eq!(
+        read_extracted(&mut device, &gpt.partition, "EFI/BOOT/BOOTX64.EFI").unwrap(),
+        EFI_BOOT
+    );
+
+    let mut mbr = [0u8; 512];
+    device.read_exact_at(0, &mut mbr).unwrap();
+    assert_eq!(&mbr[510..512], &[0x55, 0xAA]);
+    assert_eq!(mbr[446 + 4], 0xEE);
+
+    let mut header = [0u8; 92];
+    device.read_exact_at(512, &mut header).unwrap();
+    assert_eq!(&header[0..8], b"EFI PART");
+    assert_eq!(u64::from_le_bytes(header[24..32].try_into().unwrap()), 1);
+
+    let mut entry = [0u8; 128];
+    device.read_exact_at(1024, &mut entry).unwrap();
+    assert_eq!(
+        &entry[0..16],
+        &[
+            0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E,
+            0xC9, 0x3B
+        ]
+    );
+
+    match std::process::Command::new("sgdisk")
+        .arg("--verify")
+        .arg(&disk)
+        .output()
+    {
+        Ok(output) => assert!(
+            output.status.success(),
+            "sgdisk --verify failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => panic!("failed to run sgdisk: {err}"),
+    }
 }
 
 #[test]

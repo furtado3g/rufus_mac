@@ -1,4 +1,4 @@
-//! Extraction pipeline: MBR + FAT32 + files copied from the ISO tree.
+//! Extraction pipeline: MBR or GPT + FAT32 + files copied from the ISO tree.
 //!
 //! UEFI boot works by copying the image's own `EFI/BOOT/BOOT*.EFI` payload.
 //! Legacy BIOS bootloaders (syslinux/GRUB core images) are not bundled yet, so
@@ -19,6 +19,7 @@ use image2usb_core::{
 use image2usb_iso::{IsoInfo, SECTOR_SIZE, WalkEntry, read_volume_descriptors, walk_tree};
 use sha2::{Digest, Sha256};
 
+use crate::gpt::{plan_gpt_layout, write_gpt};
 use crate::layout::{PartitionLayout, plan_layout, write_mbr};
 use crate::names::NameMap;
 use crate::partition::PartitionIo;
@@ -56,11 +57,6 @@ pub fn extract_image(
             "only FAT32 extraction is implemented in this build".to_owned(),
         ));
     }
-    if options.scheme != PartitionScheme::Mbr {
-        return Err(Error::Unsupported(
-            "GPT extraction is not implemented yet; use --scheme mbr".to_owned(),
-        ));
-    }
     if info.distro == image2usb_iso::Distro::Windows {
         return Err(windows_unsupported());
     }
@@ -68,7 +64,16 @@ pub fn extract_image(
     let started = Instant::now();
     let mut warnings = Vec::new();
     let image_len = std::fs::metadata(iso_path)?.len();
-    let layout = plan_layout(device.size(), device.logical_sector_size())?;
+    let (layout, gpt) = match options.scheme {
+        PartitionScheme::Mbr => (
+            plan_layout(device.size(), device.logical_sector_size())?,
+            None,
+        ),
+        PartitionScheme::Gpt => {
+            let gpt = plan_gpt_layout(device.size(), device.logical_sector_size())?;
+            (gpt.partition, Some(gpt))
+        }
+    };
 
     let mut iso = File::open(iso_path)?;
     let descriptors = read_volume_descriptors(&mut iso, image_len).map_err(iso_error)?;
@@ -142,12 +147,16 @@ pub fn extract_image(
     sink.report(ProgressEvent::message(
         Phase::Formatting,
         format!(
-            "creating MBR + FAT32 ({} partition)",
+            "creating {} partition table + FAT32 ({} partition)",
+            options.scheme.to_string().to_uppercase(),
             format_bytes(layout.len)
         ),
     ));
     cancel.check()?;
-    write_mbr(device, &layout)?;
+    match &gpt {
+        Some(gpt) => write_gpt(device, gpt)?,
+        None => write_mbr(device, &layout)?,
+    }
 
     let mut part = PartitionIo::new(device, layout.start_byte, layout.len);
     format_fat32(&mut part, &layout, options, info)?;

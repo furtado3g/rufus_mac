@@ -13,8 +13,8 @@ use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 use image2usb_core::util::format_bytes;
 use image2usb_core::{
-    CancelToken, DeviceInfo, Phase, ProgressEvent, ProgressSink, ResolvedMode, Result, VerifyMode,
-    WriteOptions, check_target, verify_image, write_image,
+    CancelToken, DeviceInfo, PartitionScheme, Phase, ProgressEvent, ProgressSink, ResolvedMode,
+    Result, VerifyMode, WriteOptions, check_target, verify_image, write_image,
 };
 use image2usb_extract::extract_image;
 use image2usb_iso::{Distro, IsoInfo, analyze_path};
@@ -77,6 +77,7 @@ struct App {
     analysis_error: Option<String>,
 
     mode: ModeChoice,
+    scheme: PartitionScheme,
     verify: bool,
     confirmed: bool,
 
@@ -102,6 +103,7 @@ impl App {
             analysis: None,
             analysis_error: None,
             mode: ModeChoice::Auto,
+            scheme: PartitionScheme::Mbr,
             verify: true,
             confirmed: false,
             busy: false,
@@ -231,6 +233,7 @@ impl App {
 
         let tx = self.tx.clone();
         let verify = self.verify;
+        let scheme = self.scheme;
         let ctx_worker = ctx.clone();
         thread::spawn(move || {
             let platform = native();
@@ -261,6 +264,7 @@ impl App {
                     }
                     ResolvedMode::Extract => {
                         let options = WriteOptions {
+                            scheme,
                             verify: if verify {
                                 VerifyMode::Sha256
                             } else {
@@ -507,6 +511,15 @@ impl App {
 
         if self.resolved_mode() == Some(ResolvedMode::Extract) {
             ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("Partition table");
+                egui::ComboBox::from_id_salt("scheme")
+                    .selected_text(self.scheme.to_string().to_uppercase())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.scheme, PartitionScheme::Mbr, "MBR");
+                        ui.selectable_value(&mut self.scheme, PartitionScheme::Gpt, "GPT + ESP");
+                    });
+            });
             if self.extract_windows() {
                 ui.colored_label(
                     egui::Color32::from_rgb(255, 120, 120),
@@ -515,8 +528,9 @@ impl App {
             } else {
                 ui.colored_label(
                     egui::Color32::YELLOW,
-                    "Extraction creates an MBR + FAT32 volume from the ISO tree. UEFI boot is \
-                     supported; legacy BIOS bootloaders are not installed yet.",
+                    "Extraction creates a FAT32 volume from the ISO tree (MBR by default, or \
+                     GPT + ESP). UEFI boot is supported; legacy BIOS bootloaders are not \
+                     installed yet.",
                 );
             }
         }

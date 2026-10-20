@@ -34,7 +34,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev dosfstools
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev dosfstools gdisk
 
       - uses: Swatinem/rust-cache@v2
 

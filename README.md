@@ -6,10 +6,10 @@ image2usb is a portable, cross-platform alternative to Rufus written in Rust. It
 ships as a self-contained executable / app bundle: no installer, no runtime, no
 external tools required.
 
-> Status: **pre-alpha** (M2 — extraction hardening). Device enumeration, ISO
-> analysis, DD-mode writing and UEFI extraction are implemented; an extracted
-> image boots to a live desktop under QEMU/OVMF. GPT, BIOS bootloaders, Windows
-> media and physical-hardware validation are still in progress.
+> Status: **pre-alpha** (M3 — GPT + ESP). Device enumeration, ISO analysis,
+> DD-mode writing and UEFI extraction are implemented. Both MBR and GPT/ESP
+> images boot to a live desktop under QEMU/OVMF. BIOS bootloaders, Windows media
+> and physical-hardware validation are still in progress.
 
 See [ROADMAP.md](ROADMAP.md) for the detailed plan, development setup on another
 machine, and per-milestone acceptance criteria.
@@ -19,8 +19,9 @@ machine, and per-milestone acceptance criteria.
 - [x] Safe device enumeration (USB / SD only, system disks blocked)
 - [x] ISO analysis: ISO9660, Joliet, El Torito (BIOS/UEFI), hybrid detection
 - [x] DD mode: write a hybrid ISO byte-for-byte, with progress, cancel and SHA-256 verification
-- [x] Extraction mode: MBR + FAT32 + files copied from the ISO tree (UEFI boot, Linux distros)
-- [ ] GPT extraction and NTFS data partitions
+- [x] Extraction mode: MBR or GPT + FAT32 + files copied from the ISO tree (UEFI boot, Linux distros)
+- [x] GPT with a single EFI System Partition (ESP)
+- [ ] NTFS data partitions and a second partition for large trees
 - [ ] BIOS boot: syslinux, GRUB2, Windows BOOTMGR
 - [ ] Windows installation media (wimlib / split-WIM)
 - [ ] Windows 11 unattended options (TPM / Secure Boot / offline account bypass)
@@ -42,6 +43,7 @@ $ image2usb list
 $ image2usb analyze ubuntu-24.04.iso
 $ sudo image2usb write ubuntu-24.04.iso --device /dev/disk4 --verify
 $ sudo image2usb write ubuntu-24.04.iso --device /dev/disk4 --mode extract --verify
+$ sudo image2usb write ubuntu-24.04.iso --device /dev/disk4 --mode extract --scheme gpt --verify
 ```
 
 `image2usb` must run with administrator/root privileges to write to a raw device.
@@ -53,20 +55,22 @@ a UAC prompt; start the terminal (or the executable) as Administrator before
 
 ### Extraction mode
 
-`--mode extract` creates an MBR partition table with one FAT32 partition and
-copies the ISO tree. It is the fallback for bootable images that cannot be
+`--mode extract` creates one FAT32 partition and copies the ISO tree. MBR is the
+default; `--scheme gpt` writes a protective MBR, primary/backup GPT and one EFI
+System Partition (ESP). It is the fallback for bootable images that cannot be
 written 1:1 (non-hybrid ISOs):
 
 ```console
 $ sudo image2usb write ubuntu-24.04.iso --device /dev/disk4 --mode extract --verify
 ```
 
-Current limits (M2):
+Current limits (M3):
 
 - **UEFI boot only.** The image's own `EFI/BOOT/BOOT*.EFI` tree is copied, so
   modern UEFI firmware boots it. No syslinux/GRUB BIOS boot record is installed
   yet; hybrid images that must boot on legacy BIOS should use DD mode.
-- **MBR + FAT32 only.** GPT and NTFS are rejected with an explicit error.
+- **FAT32 only; one ESP.** GPT mode writes a single EFI System Partition. NTFS
+  and a separate data partition for very large trees are not implemented yet.
 - **Linux/BSD distributions only.** Windows installation media needs wimlib and
   split-WIM support, which is not implemented yet.
 - **UDF-only images are rejected.** Hybrid ISO/UDF images are extracted from
@@ -75,9 +79,9 @@ Current limits (M2):
 - **Rock Ridge symlinks** are detected from direct `SL` entries and from SUSP
   `CE` continuation areas, then skipped with a warning because FAT32 has no
   symlinks. Use DD mode if a boot path depends on a symlink.
-- **Space is checked before the MBR is touched.** Extraction estimates the FAT32
-  data area, directory-entry slots and long-file-name overhead and rejects a
-  target that is too small with an explicit error.
+- **Space is checked before the partition table is touched.** Extraction
+  estimates the FAT32 data area, directory-entry slots and long-file-name
+  overhead and rejects a target that is too small with an explicit error.
 - **4Kn and Unicode names:** file-backed 4 KiB logical-sector targets are tested,
   and FAT names are normalized to NFC and sanitized for reserved names, trailing
   dots/spaces and case-only collisions.

@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use image2usb_core::{
-    CancelToken, DeviceInfo, Error, FileDevice, Phase, ProgressEvent, ProgressSink, RawIo,
-    ResolvedMode, Result, SafetyError, VerifyMode, WriteOptions, check_target, verify_image,
-    write_image,
+    CancelToken, DeviceInfo, Error, FileDevice, PartitionScheme, Phase, ProgressEvent,
+    ProgressSink, RawIo, ResolvedMode, Result, SafetyError, VerifyMode, WriteOptions, check_target,
+    verify_image, write_image,
 };
 use image2usb_extract::extract_image;
 use image2usb_iso::{IsoInfo, analyze_path};
@@ -75,6 +75,9 @@ enum Command {
         /// Write strategy.
         #[arg(long, value_enum, default_value_t = ModeArg::Auto)]
         mode: ModeArg,
+        /// Partition table for extraction (default: mbr).
+        #[arg(long, value_enum, default_value_t = SchemeArg::Mbr)]
+        scheme: SchemeArg,
         /// FAT32 volume label for extraction mode (default: ISO volume ID).
         #[arg(long)]
         label: Option<String>,
@@ -90,6 +93,21 @@ enum ModeArg {
     Auto,
     Dd,
     Extract,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SchemeArg {
+    Mbr,
+    Gpt,
+}
+
+impl From<SchemeArg> for PartitionScheme {
+    fn from(value: SchemeArg) -> Self {
+        match value {
+            SchemeArg::Mbr => PartitionScheme::Mbr,
+            SchemeArg::Gpt => PartitionScheme::Gpt,
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -119,9 +137,12 @@ fn run(command: Command) -> Result<()> {
             yes,
             dry_run,
             mode,
+            scheme,
             label,
             verify,
-        } => write(&iso, device, output, yes, dry_run, mode, label, verify),
+        } => write(
+            &iso, device, output, yes, dry_run, mode, scheme, label, verify,
+        ),
     }
 }
 
@@ -276,7 +297,7 @@ fn analyze(path: &Path, json: bool) -> Result<()> {
         if info.dd_safe() {
             "DD (write the image 1:1)"
         } else {
-            "extraction (MBR + FAT32, UEFI boot files)"
+            "extraction (MBR or GPT + FAT32, UEFI boot files)"
         }
     );
     Ok(())
@@ -290,6 +311,7 @@ fn write(
     yes: bool,
     dry_run: bool,
     mode: ModeArg,
+    scheme: SchemeArg,
     label: Option<String>,
     verify: bool,
 ) -> Result<()> {
@@ -302,6 +324,7 @@ fn write(
         VerifyMode::None
     };
     let options = WriteOptions {
+        scheme: scheme.into(),
         label: label.unwrap_or_default(),
         verify: verify_mode,
         ..WriteOptions::default()
@@ -314,8 +337,11 @@ fn write(
         "Mode:   {} ({})",
         resolved,
         match resolved {
-            ResolvedMode::Dd => "byte-for-byte copy",
-            ResolvedMode::Extract => "MBR + FAT32, file extraction",
+            ResolvedMode::Dd => "byte-for-byte copy".to_owned(),
+            ResolvedMode::Extract => format!(
+                "{} + FAT32, file extraction",
+                options.scheme.to_string().to_uppercase()
+            ),
         }
     );
     if resolved == ResolvedMode::Extract {

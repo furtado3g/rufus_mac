@@ -7,11 +7,13 @@
 #![forbid(unsafe_code)]
 
 mod extract;
+mod gpt;
 pub mod layout;
 mod names;
 mod partition;
 mod postprocess;
 
 pub use extract::{ExtractStats, extract_image, list_extracted, preview, read_extracted};
+pub use gpt::{GptLayout, plan_gpt_layout, write_gpt};
 pub use layout::{PartitionLayout, plan_layout, write_mbr};
 pub use partition::PartitionIo;
