@@ -4,6 +4,8 @@ members = [
     "crates/core",
     "crates/platform",
     "crates/iso",
+    "crates/extract",
+    "crates/testiso",
     "crates/cli",
     "crates/gui",
 ]
@@ -22,6 +24,7 @@ description = "Create bootable USB drives from ISO images on macOS, Linux and Wi
 image2usb-core = { path = "crates/core" }
 image2usb-platform = { path = "crates/platform" }
 image2usb-iso = { path = "crates/iso" }
+image2usb-extract = { path = "crates/extract" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -37,6 +40,7 @@ plist = "1"
 tempfile = "3"
 eframe = "0.37"
 rfd = "0.17"
+fatfs = "0.3"
 
 [profile.release]
 lto = "thin"

@@ -22,11 +22,18 @@
 ## Verifying a written device without booting
 
 1. Compare hashes: `image2usb write --verify` reads the device back and compares
-   every byte, reporting the first differing offset.
+   every byte, reporting the first differing offset. In extraction mode it reads
+   every copied file back and compares its SHA-256.
 2. Inspect the partition table: `sudo fdisk -l /dev/sdX`,
    `sudo sgdisk --verify /dev/sdX`, `diskutil list diskX`.
 3. Mount read-only and compare file trees: `mtools`/`7z l` for FAT32,
    `findmnt` for ISO 9660.
+4. Check the generated FAT32 volume with `fsck_msdos -n /dev/rdiskN` (macOS) or
+   `fsck.vfat -n /dev/sdXN` (Linux).
+
+Phase 0.3 extraction has been validated structurally (MBR recognized by macOS,
+FAT32 mounts, `fsck_msdos` clean, file hashes match after read-back). Booting it
+on real firmware is still on the verification list below.
 
 ## QEMU smoke test (planned for phase 0.1)
 

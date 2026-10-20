@@ -1,0 +1,23 @@
+[package]
+name = "image2usb-extract"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Partitioning, FAT32 and file extraction for image2usb"
+
+[dependencies]
+image2usb-core.workspace = true
+image2usb-iso.workspace = true
+fatfs.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+image2usb-testiso = { path = "../testiso" }
+
+[lints.rust]
+unsafe_code = "forbid"

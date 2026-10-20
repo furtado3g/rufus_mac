@@ -16,6 +16,7 @@ path = "src/main.rs"
 image2usb-core.workspace = true
 image2usb-platform.workspace = true
 image2usb-iso.workspace = true
+image2usb-extract.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

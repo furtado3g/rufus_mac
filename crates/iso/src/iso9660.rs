@@ -252,6 +252,68 @@ pub fn read_dir(
     Ok(out)
 }
 
+/// A flattened directory entry produced by [`walk_tree`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalkEntry {
+    /// Path relative to the root, separated by `/` (e.g. `casper/vmlinuz`).
+    pub path: String,
+    /// Logical block address of the file or directory data.
+    pub extent: u32,
+    pub len: u32,
+    pub is_dir: bool,
+}
+
+/// Recursively list a directory tree, parents before children.
+///
+/// The walker is iterative and bounded by `max_entries`, so malformed images
+/// with directory loops cannot exhaust memory or the stack.
+pub fn walk_tree(
+    file: &mut File,
+    root: &DirRecord,
+    joliet: bool,
+    max_entries: usize,
+) -> Result<Vec<WalkEntry>> {
+    let mut out = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(root.extent);
+    let mut stack = vec![(root.clone(), String::new(), 0u32)];
+
+    while let Some((dir, prefix, depth)) = stack.pop() {
+        if depth > 32 || out.len() >= max_entries {
+            continue;
+        }
+        for record in read_dir(file, &dir, joliet, max_entries)? {
+            let path = if prefix.is_empty() {
+                record.name.clone()
+            } else {
+                format!("{prefix}/{}", record.name)
+            };
+            if record.is_dir() {
+                if visited.insert(record.extent) {
+                    out.push(WalkEntry {
+                        path: path.clone(),
+                        extent: record.extent,
+                        len: record.len,
+                        is_dir: true,
+                    });
+                    stack.push((record, path, depth + 1));
+                }
+            } else {
+                out.push(WalkEntry {
+                    path,
+                    extent: record.extent,
+                    len: record.len,
+                    is_dir: false,
+                });
+            }
+            if out.len() >= max_entries {
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Read at most `max` bytes from a file extent.
 pub fn read_file(file: &mut File, extent: u32, size: u32, max: usize) -> Result<Vec<u8>> {
     let len = (size as usize).min(max);

@@ -8,13 +8,14 @@ Exact versions and corresponding source code are published with every release.
 | Component | License | Use |
 | --- | --- | --- |
 | Rust standard library and crates listed in `Cargo.lock` | MIT / Apache-2.0 (mostly) | runtime |
-| syslinux | GPL-2.0-or-later | BIOS bootloader for extraction mode |
-| GRUB 2 | GPL-3.0-or-later | BIOS/UEFI bootloader for extraction mode |
-| UEFI:NTFS | GPL-3.0-or-later | NTFS boot support for UEFI |
-| wimlib | LGPL-3.0-or-later | WIM splitting for Windows images |
+| fatfs 0.3 | MIT | FAT32 formatting and file writing for extraction mode |
+| syslinux | GPL-2.0-or-later | BIOS bootloader for extraction mode (planned) |
+| GRUB 2 | GPL-3.0-or-later | BIOS/UEFI bootloader for extraction mode (planned) |
+| UEFI:NTFS | GPL-3.0-or-later | NTFS boot support for UEFI (planned) |
+| wimlib | LGPL-3.0-or-later | WIM splitting for Windows images (planned) |
 
-At the time of writing, only Rust crates are bundled. The components above are
-planned for extraction mode and will be added before the corresponding feature
+At the time of writing, only Rust crates are bundled. The bootloader and WIM
+components above are planned and will be added before the corresponding feature
 is released.
 
 Corresponding source code for GPL/LGPL components is available at:

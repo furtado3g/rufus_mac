@@ -1,6 +1,6 @@
 # ADR 0001 — Architecture of image2usb
 
-Status: accepted (phase 0)
+Status: accepted (phase 0), amended in phase 0.3 for extraction
 
 ## Context
 
@@ -30,6 +30,14 @@ into a platform-independent core and thin native backends.
 6. **Bundled assets, no system tools.** Bootloader payloads are embedded in the
    binary. External commands are limited to OS utilities that ship with the
    system (`diskutil`, `lsblk`) and are invoked without a shell.
+7. **Extraction lives in its own crate (phase 0.3).** `image2usb-extract`
+   depends on `core` (raw I/O, progress, cancellation) and `iso` (read-only
+   tree), and is the only crate allowed to write a partition table and a
+   filesystem. FAT32 formatting and file writing use the MIT-licensed `fatfs`
+   crate; a post-processing pass fixes `.`/`..` placement and the FSInfo free
+   count so the result passes `fsck_msdos` and firmware expectations. This
+   keeps the dangerous, stateful code small and independently testable while
+   the rest of the workspace stays safe Rust.
 
 ## Consequences
 

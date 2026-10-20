@@ -13,10 +13,11 @@ use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 use image2usb_core::util::format_bytes;
 use image2usb_core::{
-    CancelToken, DeviceInfo, Phase, ProgressEvent, ProgressSink, ResolvedMode, Result,
-    check_target, verify_image, write_image,
+    CancelToken, DeviceInfo, Phase, ProgressEvent, ProgressSink, ResolvedMode, Result, VerifyMode,
+    WriteOptions, check_target, verify_image, write_image,
 };
-use image2usb_iso::{IsoInfo, analyze_path};
+use image2usb_extract::extract_image;
+use image2usb_iso::{Distro, IsoInfo, analyze_path};
 use image2usb_platform::native;
 
 fn main() -> eframe::Result {
@@ -174,7 +175,16 @@ impl App {
             && self.confirmed
             && self.analysis.is_some()
             && self.selected_device().is_some_and(|d| d.is_safe_target())
-            && self.resolved_mode() == Some(ResolvedMode::Dd)
+            && self.resolved_mode().is_some()
+            && !self.extract_windows()
+    }
+
+    fn extract_windows(&self) -> bool {
+        self.resolved_mode() == Some(ResolvedMode::Extract)
+            && self
+                .analysis
+                .as_ref()
+                .is_some_and(|info| info.distro == Distro::Windows)
     }
 
     fn start_write(&mut self, ctx: egui::Context) {
@@ -189,7 +199,15 @@ impl App {
             self.log("Analyze an image first.");
             return;
         };
-        if let Err(err) = check_target(&device, info.size) {
+        let mode = self.resolved_mode().unwrap_or(ResolvedMode::Dd);
+        // Extraction needs room for FAT metadata and the full tree, so require
+        // at least the image size and never less than 64 MiB.
+        let required = if mode == ResolvedMode::Extract {
+            info.size.max(64 * 1024 * 1024)
+        } else {
+            info.size
+        };
+        if let Err(err) = check_target(&device, required) {
             self.log(format!("Safety check failed: {err}"));
             return;
         }
@@ -218,23 +236,52 @@ impl App {
             let _ = tx.send(Msg::Log(format!("Opening {}", device.id)));
             let result = (|| -> Result<String> {
                 let mut raw = platform.open_exclusive(&device)?;
-                let mut image = File::open(&iso)?;
-                let stats = write_image(&mut image, info.size, &mut *raw, &cancel, &sink)?;
-                let mut message = format!(
-                    "Wrote {} in {:.1}s. SHA-256 {}",
-                    format_bytes(stats.bytes_written),
-                    stats.elapsed.as_secs_f64(),
-                    stats.sha256
-                );
-                if verify {
-                    image.seek(SeekFrom::Start(0))?;
-                    let verify_stats =
-                        verify_image(&mut image, info.size, &mut *raw, &cancel, &sink)?;
-                    message.push_str(&format!(
-                        " Verified {}.",
-                        format_bytes(verify_stats.bytes_compared)
-                    ));
-                }
+                let message = match mode {
+                    ResolvedMode::Dd => {
+                        let mut image = File::open(&iso)?;
+                        let stats = write_image(&mut image, info.size, &mut *raw, &cancel, &sink)?;
+                        let mut message = format!(
+                            "Wrote {} in {:.1}s. SHA-256 {}",
+                            format_bytes(stats.bytes_written),
+                            stats.elapsed.as_secs_f64(),
+                            stats.sha256
+                        );
+                        if verify {
+                            image.seek(SeekFrom::Start(0))?;
+                            let verify_stats =
+                                verify_image(&mut image, info.size, &mut *raw, &cancel, &sink)?;
+                            message.push_str(&format!(
+                                " Verified {}.",
+                                format_bytes(verify_stats.bytes_compared)
+                            ));
+                        }
+                        message
+                    }
+                    ResolvedMode::Extract => {
+                        let options = WriteOptions {
+                            verify: if verify {
+                                VerifyMode::Sha256
+                            } else {
+                                VerifyMode::None
+                            },
+                            label: String::new(),
+                            ..WriteOptions::default()
+                        };
+                        let stats =
+                            extract_image(&iso, &info, &mut *raw, &options, &cancel, &sink)?;
+                        let mut message = format!(
+                            "Extracted {} files ({} directories, {}) in {:.1}s.",
+                            stats.files,
+                            stats.directories,
+                            format_bytes(stats.bytes),
+                            stats.elapsed.as_secs_f64()
+                        );
+                        for warning in &stats.warnings {
+                            message.push_str(&format!(" Warning: {warning}"));
+                        }
+                        message
+                    }
+                };
                 raw.invalidate()?;
                 drop(raw);
                 platform.eject(&device)?;
@@ -458,10 +505,18 @@ impl App {
 
         if self.resolved_mode() == Some(ResolvedMode::Extract) {
             ui.add_space(4.0);
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                "Extraction mode is not implemented in this build yet. Use DD for hybrid images.",
-            );
+            if self.extract_windows() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 120, 120),
+                    "Windows extraction is not implemented yet (needs wimlib/split-WIM). Use DD.",
+                );
+            } else {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "Extraction creates an MBR + FAT32 volume from the ISO tree. UEFI boot is \
+                     supported; legacy BIOS bootloaders are not installed yet.",
+                );
+            }
         }
 
         if let Some(device) = self.selected_device() {

@@ -1,0 +1,15 @@
+[package]
+name = "image2usb-testiso"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Synthetic ISO fixture builder for image2usb tests"
+publish = false
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"

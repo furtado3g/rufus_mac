@@ -16,6 +16,7 @@ path = "src/main.rs"
 image2usb-core.workspace = true
 image2usb-platform.workspace = true
 image2usb-iso.workspace = true
+image2usb-extract.workspace = true
 eframe.workspace = true
 rfd.workspace = true
 crossbeam-channel.workspace = true

@@ -30,6 +30,13 @@ pub enum Error {
     #[error("operation cancelled")]
     Cancelled,
 
+    #[error("verification failed for {path}: expected {expected} bytes, found {actual}")]
+    ExtractedFileMismatch {
+        path: String,
+        expected: u64,
+        actual: u64,
+    },
+
     #[error(
         "verification failed at byte offset {offset} (expected 0x{expected:02x}, found 0x{actual:02x})"
     )]

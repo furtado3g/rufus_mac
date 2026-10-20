@@ -11,8 +11,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use clap::{Parser, Subcommand, ValueEnum};
 use image2usb_core::{
     CancelToken, DeviceInfo, Error, FileDevice, Phase, ProgressEvent, ProgressSink, RawIo,
-    ResolvedMode, Result, SafetyError, VerifyMode, check_target, verify_image, write_image,
+    ResolvedMode, Result, SafetyError, VerifyMode, WriteOptions, check_target, verify_image,
+    write_image,
 };
+use image2usb_extract::extract_image;
 use image2usb_iso::{IsoInfo, analyze_path};
 use image2usb_platform::native;
 
@@ -60,6 +62,8 @@ enum Command {
         #[arg(long, conflicts_with = "output")]
         device: Option<String>,
         /// Write to a regular file instead of a device (testing / image creation).
+        /// Extraction requires this file to exist and be at least as large as the
+        /// ISO (and at least 64 MiB).
         #[arg(long, conflicts_with = "device")]
         output: Option<PathBuf>,
         /// Skip the interactive confirmation.
@@ -71,7 +75,11 @@ enum Command {
         /// Write strategy.
         #[arg(long, value_enum, default_value_t = ModeArg::Auto)]
         mode: ModeArg,
-        /// Read the device back and compare it with the image.
+        /// FAT32 volume label for extraction mode (default: ISO volume ID).
+        #[arg(long)]
+        label: Option<String>,
+        /// Read the device back and compare it with the image. In extraction
+        /// mode every copied file is read back and hashed.
         #[arg(long)]
         verify: bool,
     },
@@ -111,8 +119,9 @@ fn run(command: Command) -> Result<()> {
             yes,
             dry_run,
             mode,
+            label,
             verify,
-        } => write(&iso, device, output, yes, dry_run, mode, verify),
+        } => write(&iso, device, output, yes, dry_run, mode, label, verify),
     }
 }
 
@@ -267,7 +276,7 @@ fn analyze(path: &Path, json: bool) -> Result<()> {
         if info.dd_safe() {
             "DD (write the image 1:1)"
         } else {
-            "extraction (not available in this build yet)"
+            "extraction (MBR + FAT32, UEFI boot files)"
         }
     );
     Ok(())
@@ -280,6 +289,7 @@ fn write(
     yes: bool,
     dry_run: bool,
     mode: ModeArg,
+    label: Option<String>,
     verify: bool,
 ) -> Result<()> {
     let info = analyze_iso(iso)?;
@@ -290,6 +300,11 @@ fn write(
     } else {
         VerifyMode::None
     };
+    let options = WriteOptions {
+        label: label.unwrap_or_default(),
+        verify: verify_mode,
+        ..WriteOptions::default()
+    };
 
     println!("Image:  {}", iso.display());
     println!("Size:   {}", image2usb_core::util::format_bytes(image_len));
@@ -299,28 +314,46 @@ fn write(
         resolved,
         match resolved {
             ResolvedMode::Dd => "byte-for-byte copy",
-            ResolvedMode::Extract => "partition + filesystem + boot files",
+            ResolvedMode::Extract => "MBR + FAT32, file extraction",
         }
     );
+    if resolved == ResolvedMode::Extract {
+        println!(
+            "Target: {} + {}, label {}",
+            options.scheme,
+            options.filesystem,
+            label_for(&options, &info)
+        );
+    }
     for warning in &info.warnings {
         println!("warning: {warning}");
     }
 
-    if resolved == ResolvedMode::Extract {
-        return Err(Error::Unsupported(
-            "extraction mode is not implemented in this build yet. \
-             Use --mode dd for hybrid images, or wait for phase 0.3."
-                .to_owned(),
-        ));
-    }
+    // Extraction needs room for the FAT structures and the full tree; require
+    // at least the image size so a too-small device is rejected before the MBR
+    // is touched.
+    let required = if resolved == ResolvedMode::Extract {
+        image_len.max(64 * 1024 * 1024)
+    } else {
+        image_len
+    };
 
     if dry_run {
         println!();
         println!("Dry run: no data will be written.");
+        if resolved == ResolvedMode::Extract {
+            let (files, dirs, bytes) = image2usb_extract::preview(iso)?;
+            println!(
+                "Would extract {} files ({} directories, {}) from the ISO tree.",
+                files,
+                dirs,
+                image2usb_core::util::format_bytes(bytes)
+            );
+        }
         if let Some(device) = &device {
             let target = find_device(device)?;
             print_target(&target);
-            check_target(&target, image_len)?;
+            check_target(&target, required)?;
             println!("Safety checks: passed");
         } else if let Some(output) = &output {
             println!("Would write to file: {}", output.display());
@@ -340,10 +373,22 @@ fn write(
                 output.display()
             )));
         }
-        let mut device = open_output(&output, image_len)?;
+        let mut target = match resolved {
+            ResolvedMode::Dd => open_output(&output, image_len)?,
+            ResolvedMode::Extract => open_output_existing(&output, required)?,
+        };
         let cancel = install_cancel_handler()?;
         let sink = CliSink::new();
-        execute_write(iso, image_len, &mut device, &sink, &cancel, verify_mode)?;
+        run_on_target(
+            resolved,
+            iso,
+            &info,
+            image_len,
+            &mut target,
+            &options,
+            &sink,
+            &cancel,
+        )?;
         println!("Done. Output image: {}", output.display());
         return Ok(());
     }
@@ -355,7 +400,7 @@ fn write(
     };
     let target = find_device(&device_id)?;
     print_target(&target);
-    check_target(&target, image_len)?;
+    check_target(&target, required)?;
 
     if !yes {
         confirm(&target)?;
@@ -366,7 +411,9 @@ fn write(
     let sink = CliSink::new();
     let write_result = {
         let mut raw = platform.open_exclusive(&target)?;
-        let result = execute_write(iso, image_len, &mut *raw, &sink, &cancel, verify_mode);
+        let result = run_on_target(
+            resolved, iso, &info, image_len, &mut *raw, &options, &sink, &cancel,
+        );
         if result.is_ok() {
             raw.invalidate()?;
         }
@@ -387,6 +434,54 @@ fn write(
             Err(err)
         }
     }
+}
+
+fn label_for<'a>(options: &'a WriteOptions, info: &'a IsoInfo) -> &'a str {
+    if options.label.trim().is_empty() {
+        info.volume_id.as_deref().unwrap_or("IMAGE2USB")
+    } else {
+        &options.label
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_on_target(
+    mode: ResolvedMode,
+    iso: &Path,
+    info: &IsoInfo,
+    image_len: u64,
+    target: &mut dyn RawIo,
+    options: &WriteOptions,
+    sink: &dyn ProgressSink,
+    cancel: &CancelToken,
+) -> Result<()> {
+    match mode {
+        ResolvedMode::Dd => execute_write(iso, image_len, target, sink, cancel, options.verify),
+        ResolvedMode::Extract => execute_extract(iso, info, target, options, sink, cancel),
+    }
+}
+
+fn execute_extract(
+    iso: &Path,
+    info: &IsoInfo,
+    target: &mut dyn RawIo,
+    options: &WriteOptions,
+    sink: &dyn ProgressSink,
+    cancel: &CancelToken,
+) -> Result<()> {
+    let stats = extract_image(iso, info, target, options, cancel, sink)?;
+    println!();
+    println!(
+        "Extracted {} files ({} directories, {}) in {:.1}s.",
+        stats.files,
+        stats.directories,
+        image2usb_core::util::format_bytes(stats.bytes),
+        stats.elapsed.as_secs_f64()
+    );
+    for warning in &stats.warnings {
+        println!("warning: {warning}");
+    }
+    Ok(())
 }
 
 fn execute_write(
@@ -498,6 +593,28 @@ fn open_output(path: &Path, len: u64) -> Result<FileDevice> {
     FileDevice::open(path)
 }
 
+/// Extraction cannot infer the target size from the ISO, so `--output` must be
+/// a pre-sized file. Tests use `mkfile 256m`/`truncate -s 256M`.
+fn open_output_existing(path: &Path, min_len: u64) -> Result<FileDevice> {
+    let meta = std::fs::metadata(path).map_err(|_| {
+        Error::Other(format!(
+            "--output for extraction must be an existing file of at least {} \
+             (create it first, e.g. `mkfile 256m {}`)",
+            image2usb_core::util::format_bytes(min_len),
+            path.display()
+        ))
+    })?;
+    if meta.len() < min_len {
+        return Err(Error::Other(format!(
+            "output file {} is too small ({} < {} required)",
+            path.display(),
+            image2usb_core::util::format_bytes(meta.len()),
+            image2usb_core::util::format_bytes(min_len)
+        )));
+    }
+    FileDevice::open(path)
+}
+
 fn analyze_iso(path: &Path) -> Result<IsoInfo> {
     analyze_path(path).map_err(|err| Error::InvalidImage(err.to_string()))
 }
@@ -587,6 +704,7 @@ fn exit_code(err: &Error) -> u8 {
         Error::InvalidImage(_) | Error::Unsupported(_) | Error::EmptyImage => 5,
         Error::Io(_) | Error::ImageTooLarge { .. } => 6,
         Error::VerifyMismatch { .. } => 7,
+        Error::ExtractedFileMismatch { .. } => 7,
         Error::Cancelled => 8,
         _ => 1,
     }
@@ -601,6 +719,9 @@ fn hint_for(err: &Error) -> Option<&'static str> {
         Error::UnsafeTarget(_) => Some("only USB/SD removable media can be used as targets"),
         Error::DeviceNotFound(_) => Some("run `image2usb list` and copy the device id exactly"),
         Error::InvalidImage(_) => Some("make sure the file is an ISO 9660 image"),
+        Error::Unsupported(message) if message.contains("Windows") => {
+            Some("use --mode dd for Windows media (UEFI boot only) or wait for split-WIM support")
+        }
         _ => None,
     }
 }

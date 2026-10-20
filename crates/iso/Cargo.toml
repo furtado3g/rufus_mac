@@ -15,6 +15,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+image2usb-testiso = { path = "../testiso" }
 
 [lints.rust]
 unsafe_code = "forbid"
