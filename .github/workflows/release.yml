@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: package (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            name: macos-universal
+            script: scripts/package-macos.sh
+          - os: windows-latest
+            name: windows-x64
+          - os: windows-11-arm
+            name: windows-arm64
+          - os: ubuntu-22.04
+            name: linux-x64
+            script: scripts/package-linux.sh
+          - os: ubuntu-22.04-arm
+            name: linux-arm64
+            script: scripts/package-linux.sh
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.98.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libwayland-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: bash "${{ matrix.script }}" "${GITHUB_REF_NAME#v}"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/package-windows.ps1 -Version $env:GITHUB_REF_NAME.TrimStart('v')
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image2usb-${{ matrix.name }}
+          path: dist/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          rm -f SHA256SUMS
+          if command -v sha256sum >/dev/null; then
+            sha256sum -- * > /tmp/SHA256SUMS
+          else
+            shasum -a 256 -- * > /tmp/SHA256SUMS
+          fi
+          mv /tmp/SHA256SUMS SHA256SUMS
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

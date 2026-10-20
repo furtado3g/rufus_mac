@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/platform",
+    "crates/iso",
+    "crates/cli",
+    "crates/gui",
+]
+default-members = ["crates/cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0-or-later"
+authors = ["image2usb contributors"]
+repository = "https://github.com/image2usb/image2usb"
+description = "Create bootable USB drives from ISO images on macOS, Linux and Windows"
+
+[workspace.dependencies]
+image2usb-core = { path = "crates/core" }
+image2usb-platform = { path = "crates/platform" }
+image2usb-iso = { path = "crates/iso" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+sha2 = "0.10"
+hex = "0.4"
+crossbeam-channel = "0.5"
+libc = "0.2"
+plist = "1"
+tempfile = "3"
+eframe = "0.37"
+rfd = "0.17"
+
+[profile.release]
+lto = "thin"
+strip = true
+opt-level = "s"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
