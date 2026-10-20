@@ -23,13 +23,16 @@ pub struct MbrInfo {
 
 impl MbrInfo {
     /// A hybrid ISO that boots in legacy BIOS mode when copied 1:1.
+    ///
+    /// Recent Ubuntu-style images mark the first entry bootable with type
+    /// `0x00` and `start_lba == 0` (the whole image), so the active flag alone
+    /// is not enough and a zero start LBA must also be accepted.
     pub fn isohybrid_bootable(&self) -> bool {
         self.signature_valid
             && self.boot_code_nonzero
-            && self
-                .partitions
-                .iter()
-                .any(|p| p.bootable && p.start_lba > 0 && p.sectors > 0 && p.partition_type != 0xEE)
+            && self.partitions.iter().any(|p| {
+                p.sectors > 0 && p.partition_type != 0xEE && (p.bootable || p.start_lba == 0)
+            })
     }
 
     pub fn has_efi_partition(&self) -> bool {
@@ -124,4 +127,45 @@ pub fn inspect_gpt(file: &mut File, image_size: u64) -> Result<Option<GptInfo>> 
         has_esp,
         entry_count,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mbr(bootable: bool, partition_type: u8, start_lba: u32, sectors: u32) -> MbrInfo {
+        MbrInfo {
+            signature_valid: true,
+            boot_code_nonzero: true,
+            partitions: vec![MbrPartition {
+                bootable,
+                partition_type,
+                start_lba,
+                sectors,
+            }],
+        }
+    }
+
+    #[test]
+    fn classic_isohybrid_partition_is_bootable() {
+        assert!(mbr(true, 0x17, 1, 63).isohybrid_bootable());
+        assert!(!mbr(false, 0x17, 1, 63).isohybrid_bootable());
+    }
+
+    #[test]
+    fn ubuntu_style_zero_lba_entry_is_bootable() {
+        // Ubuntu 24.04+ writes a bootable type-0 entry covering the image from
+        // LBA 0, followed by the EFI system partition.
+        let mut info = mbr(true, 0x00, 0, 6_383_520);
+        assert!(info.isohybrid_bootable());
+        info.partitions[0].bootable = false;
+        assert!(info.isohybrid_bootable());
+        info.partitions[0].sectors = 0;
+        assert!(!info.isohybrid_bootable());
+    }
+
+    #[test]
+    fn protective_mbr_is_not_bootable() {
+        assert!(!mbr(false, 0xEE, 1, 100).isohybrid_bootable());
+    }
 }
