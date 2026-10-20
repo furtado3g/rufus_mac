@@ -451,11 +451,19 @@ pub fn list_extracted(
     let mut part = PartitionIo::new(device, layout.start_byte, layout.len);
     let fs = FileSystem::new(&mut part, FsOptions::new()).map_err(|err| fat_error("mount", err))?;
     let mut out = Vec::new();
-    let mut stack = vec![(fs.root_dir(), String::new())];
-    while let Some((dir, prefix)) = stack.pop() {
+    let mut stack = vec![(fs.root_dir(), String::new(), 0u32)];
+    while let Some((dir, prefix, depth)) = stack.pop() {
+        if depth > 64 {
+            continue;
+        }
         for entry in dir.iter() {
             let entry = entry.map_err(|err| fat_error(&prefix, err))?;
             let name = entry.file_name();
+            // `fatfs` exposes the dot entries of subdirectories; following
+            // them would recurse forever (and `..` walks back up the tree).
+            if name == "." || name == ".." {
+                continue;
+            }
             let path = if prefix.is_empty() {
                 name.clone()
             } else {
@@ -465,7 +473,7 @@ pub fn list_extracted(
             if entry.is_dir() {
                 out.push((path.clone(), 0));
                 if let Ok(sub) = dir.open_dir(&name) {
-                    stack.push((sub, path));
+                    stack.push((sub, path, depth + 1));
                 }
             } else {
                 out.push((path, size));

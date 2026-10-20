@@ -55,7 +55,7 @@ impl NameMap {
             candidate = add_suffix(base, counter);
             counter += 1;
             if counter > 9999 {
-                candidate = format!("_{:x}", self.used.len());
+                candidate = format!("_{:x}_{counter}", self.used.len());
             }
         }
     }

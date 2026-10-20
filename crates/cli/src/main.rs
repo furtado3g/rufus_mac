@@ -62,8 +62,8 @@ enum Command {
         #[arg(long, conflicts_with = "output")]
         device: Option<String>,
         /// Write to a regular file instead of a device (testing / image creation).
-        /// Extraction requires this file to exist and be at least as large as the
-        /// ISO (and at least 64 MiB).
+        /// Extraction requires this file to exist and be at least the ISO size
+        /// plus 16 MiB (and at least 64 MiB).
         #[arg(long, conflicts_with = "device")]
         output: Option<PathBuf>,
         /// Skip the interactive confirmation.
@@ -282,6 +282,7 @@ fn analyze(path: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write(
     iso: &Path,
     device: Option<String>,
@@ -329,11 +330,12 @@ fn write(
         println!("warning: {warning}");
     }
 
-    // Extraction needs room for the FAT structures and the full tree; require
-    // at least the image size so a too-small device is rejected before the MBR
-    // is touched.
+    // Extraction needs room for the FAT tables, directory entries and the full
+    // tree, so require the image size plus a small margin (and at least 64 MiB).
     let required = if resolved == ResolvedMode::Extract {
-        image_len.max(64 * 1024 * 1024)
+        image_len
+            .saturating_add(16 * 1024 * 1024)
+            .max(64 * 1024 * 1024)
     } else {
         image_len
     };

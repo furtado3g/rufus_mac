@@ -201,9 +201,11 @@ impl App {
         };
         let mode = self.resolved_mode().unwrap_or(ResolvedMode::Dd);
         // Extraction needs room for FAT metadata and the full tree, so require
-        // at least the image size and never less than 64 MiB.
+        // the image size plus a margin and never less than 64 MiB.
         let required = if mode == ResolvedMode::Extract {
-            info.size.max(64 * 1024 * 1024)
+            info.size
+                .saturating_add(16 * 1024 * 1024)
+                .max(64 * 1024 * 1024)
         } else {
             info.size
         };

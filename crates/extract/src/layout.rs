@@ -86,7 +86,11 @@ pub fn write_mbr(device: &mut dyn RawIo, layout: &PartitionLayout) -> Result<()>
     mbr[510] = 0x55;
     mbr[511] = 0xAA;
 
-    device.write_all_at(0, &mbr)?;
+    // Write at least one full logical sector: 4Kn devices reject a 512-byte
+    // write even though the MBR itself is only 512 bytes long.
+    let mut sector = vec![0u8; layout.sector_size.max(512) as usize];
+    sector[..512].copy_from_slice(&mbr);
+    device.write_all_at(0, &sector)?;
     device.sync()?;
     Ok(())
 }

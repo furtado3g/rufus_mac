@@ -264,13 +264,7 @@ fn recurse_children(
 }
 
 fn parse_entries(data: &[u8]) -> Vec<[u8; 32]> {
-    let mut entries = Vec::with_capacity(data.len() / 32);
-    for chunk in data.chunks_exact(32) {
-        let mut entry = [0u8; 32];
-        entry.copy_from_slice(chunk);
-        entries.push(entry);
-    }
-    entries
+    data.as_chunks::<32>().0.to_vec()
 }
 
 fn is_dir(entry: &[u8; 32]) -> bool {
@@ -307,7 +301,7 @@ fn chain(disk: &mut PartitionIo<'_>, geometry: &Geometry, start: u32) -> io::Res
             &mut buffer,
         )?;
         let next = u32::from_le_bytes(buffer) & 0x0FFF_FFFF;
-        if next >= 0x0FFF_FFF8 || next < 2 {
+        if !(2..0x0FFF_FFF8).contains(&next) {
             break;
         }
         current = next;
@@ -428,7 +422,7 @@ mod tests {
             // Root entry 0 is the volume label or the first directory; find
             // the first real directory and check its first two entries.
             let mut child = None;
-            for entry in first.chunks_exact(32) {
+            for entry in first.as_chunks::<32>().0 {
                 if entry[0] == 0
                     || entry[0] == DELETED
                     || entry[11] == ATTR_LFN
@@ -437,11 +431,10 @@ mod tests {
                 {
                     continue;
                 }
-                let entry: [u8; 32] = entry.try_into().unwrap();
                 if &entry[0..11] == DOT || &entry[0..11] == DOTDOT {
                     continue;
                 }
-                child = Some(entry_cluster(&entry));
+                child = Some(entry_cluster(entry));
                 break;
             }
             let child = child.expect("directory a");

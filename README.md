@@ -66,8 +66,9 @@ Current limits (Phase 0.3):
 - **Linux/BSD distributions only.** Windows installation media needs wimlib and
   split-WIM support, which is not implemented yet.
 - **`--output` is for tests.** Extraction writes into an existing pre-sized file
-  of at least `max(ISO size, 64 MiB)`; create it with `mkfile 256m` (macOS) or
-  `truncate -s 256M` (Linux). Writing to a real device needs no extra option.
+  of at least `ISO size + 16 MiB` (never less than 64 MiB); create it with
+  `mkfile 256m` (macOS) or `truncate -s 256M` (Linux). Writing to a real device
+  needs no extra option.
 
 With `--verify`, every extracted file is read back from FAT32 and hashed; the
 command fails at the first size or content mismatch. The generated volume is
