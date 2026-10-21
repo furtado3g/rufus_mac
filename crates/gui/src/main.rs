@@ -529,8 +529,9 @@ impl App {
                 ui.colored_label(
                     egui::Color32::YELLOW,
                     "Extraction creates a FAT32 volume from the ISO tree (MBR by default, or \
-                     GPT + ESP). UEFI boot is supported; legacy BIOS bootloaders are not \
-                     installed yet.",
+                     GPT + ESP). UEFI boot comes from EFI/BOOT; legacy BIOS uses the bundled \
+                     GRUB core when the ISO has boot/grub/grub.cfg or boot/grub2/grub.cfg, \
+                     otherwise use DD mode for BIOS.",
                 );
             }
         }

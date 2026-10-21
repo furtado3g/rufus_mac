@@ -12,16 +12,18 @@
 
 | Target | Verified by | Status |
 | --- | --- | --- |
-| UEFI x86_64 (OVMF) | QEMU boot, extraction + DD control | **verified 2026-10-20** (live desktop) |
-| Legacy BIOS (SeaBIOS) | QEMU smoke test | extraction not implemented; DD only |
+| UEFI x86_64 (OVMF) | QEMU boot, extraction + DD control | **verified 2026-10-20** (live desktop; M4 regression reached Anaconda) |
+| Legacy BIOS (SeaBIOS) | QEMU boot, extraction | **verified 2026-10-20** (Fedora MBR/GPT reached Anaconda; Alpine reached login) |
 | UEFI aarch64 (AAVMF) | QEMU | untested (CI build only) |
 | UEFI-only laptop | physical hardware | pending |
-| Legacy-only desktop | physical hardware | pending; DD only |
+| Legacy-only desktop | physical hardware | pending; QEMU SeaBIOS verified |
 | Apple Silicon Mac (UEFI) | physical hardware | pending |
 
 The QEMU/OVMF extraction and DD control run, including screenshots, serial logs
 and hashes, is recorded in
-[validation/uefi-2026-10-20.md](validation/uefi-2026-10-20.md).
+[validation/uefi-2026-10-20.md](validation/uefi-2026-10-20.md). The M4 legacy
+BIOS run, including the UEFI regression, is recorded in
+[validation/bios-2026-10-20.md](validation/bios-2026-10-20.md).
 
 ## Verifying a written device without booting
 
@@ -46,8 +48,14 @@ QEMU. A GPT/ESP extraction (`--scheme gpt`) did the same. A five-distribution ma
 also extracted, mounted and passed `fsck`; Fedora reached Anaconda and Alpine
 reached a login prompt under OVMF. Long ISO labels are rewritten to FAT32's
 11-character label in boot configs (Fedora's `Fedora-E-dvd-x86_64-44` becomes
-`FEDORA-E-DV`). Physical firmware and BIOS boot are still on the verification
-list.
+`FEDORA-E-DV`). Physical firmware is still on the verification list.
+
+Legacy BIOS extraction installs a bundled GRUB 2.14 i386-pc `boot.img` at LBA 0
+and a core at LBA 34, then loads the distribution's own
+`/boot/grub/grub.cfg` or `/boot/grub2/grub.cfg`. It works in both MBR and GPT
+layouts. Images without either config print a warning and keep UEFI boot;
+4Kn targets (4096-byte logical sectors) skip BIOS installation for the same
+reason. Use DD mode when BIOS boot is required for those images.
 
 ## Booting an extracted image in QEMU (UEFI)
 
@@ -73,6 +81,25 @@ loads `EFI/BOOT/BOOTX64.EFI`, and GRUB reads `/boot/grub/grub.cfg` and the
 `/casper` kernel/initrd. On Linux replace `hvf` with `kvm` and point the pflash
 drives at `/usr/share/OVMF/OVMF_CODE.fd` and `OVMF_VARS.fd`; use `-accel tcg`
 when hardware acceleration is unavailable.
+
+## Booting an extracted image in QEMU (legacy BIOS)
+
+Omit the pflash drives to use QEMU's built-in SeaBIOS. The rest of the USB
+attachment is the same:
+
+```console
+$ qemu-system-x86_64 \
+    -machine q35,accel=hvf -cpu host -m 4096 -smp 4 \
+    -drive if=none,id=usb,format=raw,snapshot=on,file=/tmp/real-extract.img \
+    -device qemu-xhci -device usb-storage,drive=usb,bootindex=0 \
+    -vga std -display vnc=127.0.0.1:2
+```
+
+SeaBIOS reads the GRUB `boot.img` from LBA 0, loads the core from LBA 34, and
+the core finds `/boot/grub/grub.cfg` or `/boot/grub2/grub.cfg` on the FAT32
+partition. On Linux use `-accel kvm` or `-accel tcg` as appropriate. This was
+validated with Fedora MBR and GPT images; screenshots and hashes are in
+[validation/bios-2026-10-20.md](validation/bios-2026-10-20.md).
 
 ## CI smoke test (planned)
 

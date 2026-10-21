@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+mod bios;
 mod extract;
 mod gpt;
 pub mod layout;

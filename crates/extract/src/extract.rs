@@ -1,9 +1,10 @@
 //! Extraction pipeline: MBR or GPT + FAT32 + files copied from the ISO tree.
 //!
 //! UEFI boot works by copying the image's own `EFI/BOOT/BOOT*.EFI` payload.
-//! Legacy BIOS bootloaders (syslinux/GRUB core images) are not bundled yet, so
-//! extraction is currently UEFI-only; hybrid images can still be written with
-//! DD mode.
+//! For legacy BIOS, a small bundled GRUB core is installed in the gap before
+//! the partition; it loads the distribution's own `boot/grub/grub.cfg` or
+//! `boot/grub2/grub.cfg`. Images without either config keep UEFI boot only and
+//! are expected to use DD mode when legacy BIOS is required.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -102,12 +103,28 @@ pub fn extract_image(
         let path = entry.path.to_ascii_lowercase();
         path.starts_with("efi/boot/boot") && path.ends_with(".efi")
     });
+    let grub_config = crate::bios::grub_config(&entries);
     if !has_uefi {
         warnings.push(
-            "no EFI/BOOT/BOOT*.EFI found: the result will not boot on UEFI firmware, and legacy \
-             BIOS bootloaders are not installed yet"
+            "no EFI/BOOT/BOOT*.EFI found: the result will not boot on UEFI firmware".to_owned(),
+        );
+    }
+    if grub_config.is_none() {
+        warnings.push(
+            "no boot/grub/grub.cfg or boot/grub2/grub.cfg found: legacy BIOS boot will not be \
+             installed; use DD mode if this image must boot on BIOS firmware"
                 .to_owned(),
         );
+    } else if !crate::bios::fits(&layout, options.scheme) {
+        warnings.push(format!(
+            "legacy BIOS boot will not be installed: {} requires 512-byte logical sectors \
+             (4Kn/4096-byte media is UEFI-only) and a 1 MiB partition gap; UEFI boot remains \
+             available, or use DD mode",
+            grub_config
+                .as_ref()
+                .map(|entry| entry.path.as_str())
+                .unwrap_or("the GRUB configuration")
+        ));
     }
 
     let symlinks = entries
@@ -283,6 +300,17 @@ pub fn extract_image(
     cancel.check()?;
     drop(part);
     device.sync()?;
+
+    if let Some(config) = grub_config
+        && crate::bios::fits(&layout, options.scheme)
+    {
+        cancel.check()?;
+        sink.report(ProgressEvent::message(
+            Phase::Finalizing,
+            format!("installing GRUB BIOS bootloader for {}", config.path),
+        ));
+        crate::bios::install(device, &layout, options.scheme)?;
+    }
 
     if options.verify == VerifyMode::Sha256 {
         verify_manifest(device, &layout, &manifest, cancel, sink)?;

@@ -3,8 +3,8 @@
 //! MBR mode writes a single type `0x0C` (FAT32 LBA) partition. UEFI firmware on
 //! removable media scans every FAT partition for `\EFI\BOOT\BOOT<arch>.EFI`, so
 //! the ESP type is not required for booting, but GPT mode provides it anyway.
-//! GPT generation lives in `gpt.rs`; a BIOS boot record is planned for the next
-//! phase.
+//! GPT generation lives in `gpt.rs`; the legacy BIOS boot code is installed
+//! later, into the 1 MiB gap, by `bios.rs`.
 
 use image2usb_core::{Error, RawIo, Result};
 
@@ -82,7 +82,8 @@ pub fn write_mbr(device: &mut dyn RawIo, layout: &PartitionLayout) -> Result<()>
 
     let mut mbr = [0u8; 512];
     let entry = &mut mbr[446..462];
-    entry[0] = 0x00; // not active: extraction currently installs no BIOS boot record
+    // The BIOS installer marks the partition active when it writes GRUB.
+    entry[0] = 0x00;
     entry[1..4].copy_from_slice(&[0xFE, 0xFF, 0xFF]); // CHS start (dummy for large disks)
     entry[4] = PARTITION_TYPE_FAT32_LBA;
     entry[5..8].copy_from_slice(&[0xFE, 0xFF, 0xFF]); // CHS end

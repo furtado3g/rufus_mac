@@ -297,7 +297,7 @@ fn analyze(path: &Path, json: bool) -> Result<()> {
         if info.dd_safe() {
             "DD (write the image 1:1)"
         } else {
-            "extraction (MBR or GPT + FAT32, UEFI boot files)"
+            "extraction (MBR or GPT + FAT32, UEFI + BIOS boot)"
         }
     );
     Ok(())

@@ -8,8 +8,8 @@ use image2usb_extract::{
 };
 use image2usb_iso::analyze_path;
 use image2usb_testiso::{
-    DISK_INFO, EFI_BOOT, ISOLINUX_CFG, build_image, build_image_with_large_file,
-    build_image_with_symlink,
+    DISK_INFO, EFI_BOOT, GRUB_CFG, ISOLINUX_CFG, build_image, build_image_with_grub,
+    build_image_with_large_file, build_image_with_symlink,
 };
 
 #[test]
@@ -43,7 +43,22 @@ fn extracts_uefi_tree_into_mbr_fat32() {
     assert_eq!(stats.files, 3);
     assert_eq!(stats.directories, 5);
     assert_eq!(stats.bytes, 30);
-    assert!(stats.warnings.is_empty(), "{:?}", stats.warnings);
+    assert!(
+        stats
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("legacy BIOS")),
+        "{:?}",
+        stats.warnings
+    );
+    assert!(
+        !stats
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("symlink")),
+        "{:?}",
+        stats.warnings
+    );
 
     let entries = list_extracted(&mut device, &layout).unwrap();
     let names: Vec<&str> = entries.iter().map(|(path, _)| path.as_str()).collect();
@@ -69,6 +84,8 @@ fn extracts_uefi_tree_into_mbr_fat32() {
     let mut mbr = [0u8; 512];
     device.read_exact_at(0, &mut mbr).unwrap();
     assert_eq!(&mbr[510..], &[0x55, 0xAA]);
+    assert_eq!(mbr[446], 0);
+    assert_eq!(u64::from_le_bytes(mbr[0x5c..0x64].try_into().unwrap()), 0);
     assert_eq!(mbr[446 + 4], 0x0C);
     assert_eq!(
         u32::from_le_bytes(mbr[446 + 8..446 + 12].try_into().unwrap()),
@@ -91,6 +108,146 @@ fn extracts_uefi_tree_into_mbr_fat32() {
     let free = u32::from_le_bytes(fsinfo[488..492].try_into().unwrap());
     assert_ne!(free, u32::MAX);
     assert!(free > 0);
+}
+
+#[test]
+fn installs_bios_boot_for_grub_mbr_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let iso = dir.path().join("test.iso");
+    build_image_with_grub(&iso, 0xEF, true);
+    let info = analyze_path(&iso).unwrap();
+
+    let disk = dir.path().join("disk.img");
+    std::fs::write(&disk, vec![0u8; 96 * 1024 * 1024]).unwrap();
+    let mut device = FileDevice::open(&disk).unwrap();
+    let layout = plan_layout(device.size(), device.logical_sector_size()).unwrap();
+    let stats = extract_image(
+        &iso,
+        &info,
+        &mut device,
+        &WriteOptions::default(),
+        &CancelToken::new(),
+        &NoopSink,
+    )
+    .unwrap();
+    assert!(
+        !stats
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("will not be installed")),
+        "{:?}",
+        stats.warnings
+    );
+    assert_eq!(
+        read_extracted(&mut device, &layout, "BOOT/GRUB/GRUB.CFG").unwrap(),
+        GRUB_CFG
+    );
+
+    let mut mbr = [0u8; 512];
+    device.read_exact_at(0, &mut mbr).unwrap();
+    assert_eq!(&mbr[0..3], &[0xeb, 0x63, 0x90]);
+    assert_eq!(u64::from_le_bytes(mbr[0x5c..0x64].try_into().unwrap()), 34);
+    assert_eq!(mbr[0x64], 0xff);
+    assert_eq!(mbr[446], 0x80);
+    assert_eq!(mbr[446 + 4], 0x0c);
+    assert_eq!(
+        u32::from_le_bytes(mbr[446 + 8..446 + 12].try_into().unwrap()),
+        layout.start_lba
+    );
+    assert_eq!(&mbr[510..512], &[0x55, 0xaa]);
+
+    let mut core = [0u8; 512];
+    device.read_exact_at(34 * 512, &mut core).unwrap();
+    assert_eq!(&core[0..2], &[0x52, 0x56]);
+    let start = u64::from_le_bytes(core[0x1f4..0x1fc].try_into().unwrap());
+    let len = u16::from_le_bytes(core[0x1fc..0x1fe].try_into().unwrap());
+    let segment = u16::from_le_bytes(core[0x1fe..0x200].try_into().unwrap());
+    assert_eq!(start, 35);
+    assert_eq!(
+        u64::from(len),
+        (bios_core_len("core-mbr.img") - 512).div_ceil(512)
+    );
+    assert_eq!(segment, 0x820);
+}
+
+#[test]
+fn installs_bios_boot_for_grub_gpt_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let iso = dir.path().join("test.iso");
+    build_image_with_grub(&iso, 0xEF, true);
+    let info = analyze_path(&iso).unwrap();
+
+    let disk = dir.path().join("disk.img");
+    std::fs::write(&disk, vec![0u8; 96 * 1024 * 1024]).unwrap();
+    let mut device = FileDevice::open(&disk).unwrap();
+    let gpt = plan_gpt_layout(device.size(), device.logical_sector_size()).unwrap();
+    let options = WriteOptions {
+        scheme: PartitionScheme::Gpt,
+        ..WriteOptions::default()
+    };
+    let stats = extract_image(
+        &iso,
+        &info,
+        &mut device,
+        &options,
+        &CancelToken::new(),
+        &NoopSink,
+    )
+    .unwrap();
+    assert!(
+        !stats
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("will not be installed")),
+        "{:?}",
+        stats.warnings
+    );
+    assert_eq!(
+        read_extracted(&mut device, &gpt.partition, "BOOT/GRUB/GRUB.CFG").unwrap(),
+        GRUB_CFG
+    );
+
+    let mut mbr = [0u8; 512];
+    device.read_exact_at(0, &mut mbr).unwrap();
+    assert_eq!(mbr[446 + 4], 0xee);
+    assert_eq!(mbr[446], 0);
+    assert_eq!(u64::from_le_bytes(mbr[0x5c..0x64].try_into().unwrap()), 34);
+
+    let mut header = [0u8; 92];
+    device.read_exact_at(512, &mut header).unwrap();
+    assert_eq!(&header[0..8], b"EFI PART");
+
+    let mut entry = [0u8; 16];
+    device.read_exact_at(1024, &mut entry).unwrap();
+    assert_eq!(
+        &entry,
+        &[
+            0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E,
+            0xC9, 0x3B
+        ]
+    );
+
+    let mut core = [0u8; 512];
+    device.read_exact_at(34 * 512, &mut core).unwrap();
+    assert_eq!(&core[0..2], &[0x52, 0x56]);
+    let start = u64::from_le_bytes(core[0x1f4..0x1fc].try_into().unwrap());
+    let len = u16::from_le_bytes(core[0x1fc..0x1fe].try_into().unwrap());
+    let segment = u16::from_le_bytes(core[0x1fe..0x200].try_into().unwrap());
+    assert_eq!(start, 35);
+    assert_eq!(
+        u64::from(len),
+        (bios_core_len("core-gpt.img") - 512).div_ceil(512)
+    );
+    assert_eq!(segment, 0x820);
+}
+
+fn bios_core_len(name: &str) -> u64 {
+    std::fs::read(format!(
+        "{}/../../assets/grub-bios/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+    .len() as u64
 }
 
 #[test]
@@ -334,7 +491,7 @@ fn assert_platform_fsck(scheme: PartitionScheme) {
 fn extracts_with_4k_logical_sectors() {
     let dir = tempfile::tempdir().unwrap();
     let iso = dir.path().join("test.iso");
-    build_image(&iso, 0xEF, true);
+    build_image_with_grub(&iso, 0xEF, true);
     let info = analyze_path(&iso).unwrap();
 
     let disk = dir.path().join("disk.img");
@@ -357,7 +514,12 @@ fn extracts_with_4k_logical_sectors() {
         &NoopSink,
     )
     .unwrap();
-    assert_eq!(stats.files, 3);
+    assert_eq!(stats.files, 4);
+    assert!(
+        stats.warnings.iter().any(|warning| warning.contains("4Kn")),
+        "{:?}",
+        stats.warnings
+    );
 
     let entries = list_extracted(&mut device, &layout).unwrap();
     assert!(
@@ -373,6 +535,11 @@ fn extracts_with_4k_logical_sectors() {
     let mut first_sector = vec![0u8; 4096];
     device.read_exact_at(0, &mut first_sector).unwrap();
     assert_eq!(&first_sector[510..512], &[0x55, 0xAA]);
+    assert_eq!(first_sector[446], 0);
+    assert_eq!(
+        u64::from_le_bytes(first_sector[0x5c..0x64].try_into().unwrap()),
+        0
+    );
     assert_eq!(first_sector[446 + 4], 0x0C);
     assert_eq!(
         u32::from_le_bytes(first_sector[446 + 8..446 + 12].try_into().unwrap()),

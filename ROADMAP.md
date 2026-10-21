@@ -1,6 +1,6 @@
 # image2usb roadmap
 
-Status: **pre-alpha; M2 multi-distro extraction and M3 GPT/ESP validated in QEMU/OVMF; physical hardware pending**.
+Status: **pre-alpha; M2 multi-distro extraction, M3 GPT/ESP and M4 legacy BIOS boot validated in QEMU; physical hardware pending**.
 Last updated: 2026-10-20.
 Main branch: `main` (see `git log`).
 
@@ -17,13 +17,13 @@ repository and CI is green.
 | Device safety | Done | USB/SD only, system disk refused, identity rechecked, explicit confirmation, failing offset reported |
 | ISO analysis | Done | ISO 9660, Joliet, Rock Ridge names, El Torito, hybrid MBR/GPT, distro markers |
 | DD mode | Done | 4 MiB chunks, progress, cancel, SHA-256 verify |
-| Extraction | MBR/GPT + FAT32, UEFI | Five distros (Ubuntu, Alpine, Debian, Fedora, Arch) pass space preflight, mount and `fsck`; Ubuntu boots to live desktop (MBR and GPT/ESP), Fedora to Anaconda and Alpine to login; 4Kn file-backed and platform `fsck` tests |
+| Extraction | MBR/GPT + FAT32, UEFI + GRUB BIOS | Five distros (Ubuntu, Alpine, Debian, Fedora, Arch) pass space preflight, mount and `fsck`; Ubuntu boots to live desktop (MBR and GPT/ESP), Fedora to Anaconda and Alpine to login; Fedora MBR/GPT boot through SeaBIOS and OVMF; Alpine reaches login under SeaBIOS; 4Kn file-backed and platform `fsck` tests |
 | CLI | Done | `list`, `analyze`, `write`; `--mode auto|dd|extract`, `--scheme mbr|gpt`, `--device`, `--output`, `--yes`, `--dry-run`, `--verify`, `--label` |
 | GUI | Done for DD/extract | egui/eframe, device picker, analysis, progress, Windows-extraction warning |
 | Portable artifacts | Partial | Release workflow drafted; AppImage, signing and notarization pending |
-| UEFI firmware boot | QEMU/OVMF **verified** | Extraction and DD control reached the live desktop; evidence in `docs/validation/uefi-2026-10-20.md`; physical hardware pending |
+| UEFI firmware boot | QEMU/OVMF **verified** | Extraction and DD control reached the live desktop; M4 regression reached GRUB and Anaconda on MBR and GPT; evidence in `docs/validation/uefi-2026-10-20.md` and `docs/validation/bios-2026-10-20.md`; physical hardware pending |
 | Physical USB write | Pending | No real USB stick has been written; do not use the connected Expansion HDD |
-| BIOS boot | Not implemented | Only UEFI boot files are copied |
+| Legacy BIOS boot | QEMU/SeaBIOS **verified** | Bundled GRUB 2.14 core; Fedora MBR and GPT both reached Anaconda. Non-GRUB images and 4Kn targets warn and keep UEFI; physical BIOS pending. Evidence in `docs/validation/bios-2026-10-20.md` |
 | Windows media | Not implemented | Rejected with an explicit `Unsupported` error |
 | GPT extraction | Done (single ESP) | `--scheme gpt`, protective MBR, primary/backup headers, CRC32, diskutil and OVMF validation |
 | NTFS / second data partition | Not implemented | Single FAT32 ESP only; large-tree split is deferred |
@@ -296,17 +296,25 @@ NTFS if large-tree support needs it.
 
 **Tasks**
 
-- [ ] Choose the asset strategy: syslinux for isolinux-based distributions,
-      GRUB for grub-based ones; embed only the needed modules.
-- [ ] Add GPL notices and a written offer/source link for bundled assets; update
-      `THIRD_PARTY_NOTICES.md`.
-- [ ] Write MBR boot code and the partition VBR; install `ldlinux.sys`/`core.img`
-      or the equivalent; generate a config from the ISO config, rewriting paths
-      to the FAT32 layout.
-- [ ] Build a hybrid MBR when both BIOS and UEFI must boot.
-- [ ] Detect unsupported boot layouts and fall back to DD with a clear warning.
-- [ ] Test with QEMU SeaBIOS and at least one physical legacy machine.
-- [ ] Keep UEFI boot working on the same image.
+- [x] Choose the asset strategy: one GRUB 2.14 i386-pc core for GRUB-based
+      distributions, with only the modules needed to read FAT32, find the config
+      and load the kernel/initrd. syslinux is deferred.
+- [x] Add GPL notices and a source link/offer for the bundled GRUB assets; update
+      `THIRD_PARTY_NOTICES.md` and `assets/grub-bios/README.md`.
+- [x] Write GRUB `boot.img` to LBA 0 and a core image at LBA 34, preserving the
+      target partition table; load the distribution's existing
+      `boot/grub/grub.cfg` or `boot/grub2/grub.cfg`. No partition VBR is needed
+      with GRUB's diskboot chain.
+- [x] Keep both UEFI and BIOS bootable in the same extraction: MBR mode uses the
+      BIOS boot code plus the copied EFI tree, and GPT mode keeps the protective
+      MBR while the BIOS core lives in the post-GPT gap. A partition-level
+      hybrid MBR is only needed for 1:1 DD images.
+- [x] Detect unsupported boot layouts and skip BIOS install with a clear warning
+      instead of producing a broken boot: no GRUB config (Arch), or a 4Kn target.
+- [x] Test with QEMU SeaBIOS (Fedora MBR and GPT both reached Anaconda).
+- [ ] Test on at least one physical legacy machine.
+- [x] Keep UEFI boot working on the same images (OVMF MBR reached Anaconda; GPT
+      reached the GRUB menu).
 
 **Acceptance**
 
@@ -314,11 +322,20 @@ NTFS if large-tree support needs it.
 - The same image still boots under UEFI.
 - Asset licenses and source availability are documented.
 
+**Status (2026-10-20):** implementation and QEMU validation are complete for
+GRUB-based Linux images. Fedora MBR and GPT reached Anaconda under SeaBIOS,
+Alpine reached a login prompt, and the same Fedora MBR image reached Anaconda
+under OVMF. Physical legacy hardware remains pending. Images without
+`boot/grub/grub.cfg` or `boot/grub2/grub.cfg`, and 4Kn targets, keep UEFI-only
+boot and print an explicit warning.
+
 **Risks**
 
 - Secure Boot and signed bootloaders.
 - Per-distro config differences (`isolinux.cfg`, `grub.cfg`, `loopback.cfg`).
 - GPL asset redistribution and source-offer obligations.
+- BIOS firmware/4Kn translation differences; 4Kn targets currently keep UEFI
+  only rather than writing 512-byte legacy boot code.
 
 ### M5 — Windows installation media
 
@@ -423,7 +440,8 @@ A release is blocked until all of these are true:
    `cargo test --workspace` pass.
 2. Cross-checks for Linux x86_64 and Windows x86_64 pass; native ARM64 CI jobs
    pass.
-3. UEFI boot is validated in QEMU/OVMF and on at least one physical machine.
+3. UEFI and legacy BIOS boot are validated in QEMU and on at least one physical
+   machine each.
 4. Extraction passes `fsck` and the distro's own checksum manifest on the
    supported distro list.
 5. No known high-severity safety or security issue is open.
@@ -437,8 +455,8 @@ A release is blocked until all of these are true:
 - Should extraction default to MBR or GPT once both work? Windows may force GPT;
   Linux live images work with either.
 - Which distros are officially supported for 1.0?
-- Do we bundle syslinux/GRUB assets, or generate them from a build-time
-  dependency? Licensing and reproducibility differ.
+- GRUB assets are bundled with recorded provenance (M4). syslinux remains an
+  open question for isolinux-only images; licensing and reproducibility differ.
 - Windows: split WIM on FAT32, NTFS + UEFI:NTFS, or both?
 - Is Secure Boot support in scope for 1.0, or documented as a limitation?
 - Which macOS minimum: 12 (Monterey) as currently documented, or newer?
@@ -473,9 +491,10 @@ Copy this into `docs/validation/<date>-<firmware>.md`:
    UDF >4 GiB guard; Mint/Pop!_OS coverage is optional.
 3. **M3** (GPT/ESP) is implemented and boot-tested; finish optional `gdisk`/`parted`
    checks before calling it fully closed.
-4. Choose between **M4** (BIOS) and **M5** (Windows) based on user demand; BIOS
-   needs a bootloader-asset/licensing strategy, Windows is the larger Rufus parity
-   gap and needs wimlib/split-WIM plus test media.
-5. Finish **M6** once the feature set is stable; signing credentials are the
+4. **M4** (BIOS) is implemented and QEMU-validated for GRUB-based Linux images;
+   physical legacy hardware remains in M7.
+5. **M5** (Windows) is the next feature gap: wimlib/split-WIM, NTFS/UEFI:NTFS and
+   test media.
+6. Finish **M6** once the feature set is stable; signing credentials are the
    long-lead item.
-6. Run **M7** on real hardware before tagging 1.0.
+7. Run **M7** on real hardware before tagging 1.0.

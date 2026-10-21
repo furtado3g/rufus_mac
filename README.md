@@ -6,10 +6,11 @@ image2usb is a portable, cross-platform alternative to Rufus written in Rust. It
 ships as a self-contained executable / app bundle: no installer, no runtime, no
 external tools required.
 
-> Status: **pre-alpha** (M3 — GPT + ESP). Device enumeration, ISO analysis,
-> DD-mode writing and UEFI extraction are implemented. Both MBR and GPT/ESP
-> images boot to a live desktop under QEMU/OVMF. BIOS bootloaders, Windows media
-> and physical-hardware validation are still in progress.
+> Status: **pre-alpha** (M4 — legacy BIOS boot). Device enumeration, ISO
+> analysis, DD-mode writing, UEFI extraction and legacy BIOS extraction for
+> GRUB-based Linux images are implemented. MBR and GPT/ESP images boot under
+> QEMU/SeaBIOS and QEMU/OVMF. Windows media and physical-hardware validation are
+> still in progress.
 
 See [ROADMAP.md](ROADMAP.md) for the detailed plan, development setup on another
 machine, and per-milestone acceptance criteria.
@@ -19,10 +20,11 @@ machine, and per-milestone acceptance criteria.
 - [x] Safe device enumeration (USB / SD only, system disks blocked)
 - [x] ISO analysis: ISO9660, Joliet, El Torito (BIOS/UEFI), hybrid detection
 - [x] DD mode: write a hybrid ISO byte-for-byte, with progress, cancel and SHA-256 verification
-- [x] Extraction mode: MBR or GPT + FAT32 + files copied from the ISO tree (UEFI boot, Linux distros)
+- [x] Extraction mode: MBR or GPT + FAT32 + files copied from the ISO tree (UEFI and GRUB-based BIOS boot, Linux distros)
 - [x] GPT with a single EFI System Partition (ESP)
+- [x] Legacy BIOS boot through a bundled GRUB 2.14 i386-pc core
 - [ ] NTFS data partitions and a second partition for large trees
-- [ ] BIOS boot: syslinux, GRUB2, Windows BOOTMGR
+- [ ] syslinux-based extraction and Windows BOOTMGR
 - [ ] Windows installation media (wimlib / split-WIM)
 - [ ] Windows 11 unattended options (TPM / Secure Boot / offline account bypass)
 - [x] Graphical interface (egui): device picker, ISO analysis, DD and extraction writes
@@ -57,18 +59,35 @@ a UAC prompt; start the terminal (or the executable) as Administrator before
 
 `--mode extract` creates one FAT32 partition and copies the ISO tree. MBR is the
 default; `--scheme gpt` writes a protective MBR, primary/backup GPT and one EFI
-System Partition (ESP). It is the fallback for bootable images that cannot be
-written 1:1 (non-hybrid ISOs):
+System Partition (ESP). Both layouts carry UEFI boot files and, for supported
+images, legacy BIOS boot code. Extraction is the fallback for bootable images
+that cannot be written 1:1 (non-hybrid ISOs):
 
 ```console
 $ sudo image2usb write ubuntu-24.04.iso --device /dev/disk4 --mode extract --verify
+$ sudo image2usb write ubuntu-24.04.iso --device /dev/disk4 --mode extract --scheme gpt --verify
 ```
 
-Current limits (M3):
+Current limits (M4):
 
-- **UEFI boot only.** The image's own `EFI/BOOT/BOOT*.EFI` tree is copied, so
-  modern UEFI firmware boots it. No syslinux/GRUB BIOS boot record is installed
-  yet; hybrid images that must boot on legacy BIOS should use DD mode.
+- **UEFI boot.** The image's own `EFI/BOOT/BOOT*.EFI` tree is copied, so modern
+  UEFI firmware boots it without changes.
+- **Legacy BIOS for GRUB-based Linux images.** A bundled GRUB 2.14 i386-pc
+  `boot.img` is written to LBA 0 and a GRUB core to LBA 34, in the gap before
+  the 1 MiB partition. The core loads the distribution's own
+  `/boot/grub/grub.cfg` or `/boot/grub2/grub.cfg`. Fedora and Alpine were
+  validated end-to-end with this integration; Ubuntu and Debian booted in
+  earlier M4 prototypes. See
+  [docs/validation/bios-2026-10-20.md](docs/validation/bios-2026-10-20.md).
+- **BIOS fallback is explicit.** Images without either GRUB config (for example
+  Arch) get a warning and UEFI-only media; use DD mode if legacy BIOS is
+  required. BIOS installation is also skipped on 4Kn targets (4096-byte logical
+  sectors); UEFI boot remains available. syslinux-based images and Windows
+  BOOTMGR are not supported yet.
+- **Bundled GPL assets.** The GRUB boot images are GPL-3.0-or-later; exact
+  hashes, build commands, upstream source and the source offer are in
+  [assets/grub-bios/README.md](assets/grub-bios/README.md) and
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 - **FAT32 only; one ESP.** GPT mode writes a single EFI System Partition. NTFS
   and a separate data partition for very large trees are not implemented yet.
 - **Linux/BSD distributions only.** Windows installation media needs wimlib and

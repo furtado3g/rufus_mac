@@ -22,6 +22,7 @@ const SECTORS: usize = 64;
 pub const EFI_BOOT: &[u8] = b"MZ\x90\x00";
 pub const ISOLINUX_CFG: &[u8] = b"default 0\n";
 pub const DISK_INFO: &[u8] = b"Ubuntu 24.04 LTS";
+pub const GRUB_CFG: &[u8] = b"set timeout=1\nmenuentry \"Test image\" {\n    echo test\n}\n";
 
 struct Builder {
     data: Vec<u8>,
@@ -184,6 +185,12 @@ pub fn build_image(path: &Path, platform: u8, hybrid: bool) {
     build_image_with_root_extra(path, platform, hybrid, Vec::new());
 }
 
+/// Build the standard fixture plus `boot/grub/grub.cfg`, so extraction can
+/// exercise the legacy BIOS installer.
+pub fn build_image_with_grub(path: &Path, platform: u8, hybrid: bool) {
+    build_image_with_root_extra_and_grub(path, platform, hybrid, Vec::new(), true);
+}
+
 /// Build the standard fixture plus a Rock Ridge symlink at the root.
 pub fn build_image_with_symlink(path: &Path, platform: u8, hybrid: bool) {
     build_image_with_root_extra(
@@ -207,6 +214,16 @@ pub fn build_image_with_large_file(path: &Path, len: u32) {
 }
 
 fn build_image_with_root_extra(path: &Path, platform: u8, hybrid: bool, extra: Vec<Vec<u8>>) {
+    build_image_with_root_extra_and_grub(path, platform, hybrid, extra, false);
+}
+
+fn build_image_with_root_extra_and_grub(
+    path: &Path,
+    platform: u8,
+    hybrid: bool,
+    mut extra: Vec<Vec<u8>>,
+    with_grub: bool,
+) {
     let mut b = Builder::new();
     write_mbr(&mut b, true, hybrid);
     write_pvd(&mut b);
@@ -214,12 +231,25 @@ fn build_image_with_root_extra(path: &Path, platform: u8, hybrid: bool, extra: V
     write_terminator(&mut b);
     write_catalog(&mut b, platform);
 
+    if with_grub {
+        extra.push(dir_record(b"BOOT", 35, SECTOR as u32, true));
+    }
     write_root_directory(&mut b, 20, &extra);
     write_subdirectory(&mut b, 22, 20, &[(b"BOOT", 25, SECTOR as u32, true)]);
     write_subdirectory(&mut b, 23, 20, &[(b"ISOLINUX.CFG", 32, 10, false)]);
     write_subdirectory(&mut b, 24, 20, &[]);
     write_subdirectory(&mut b, 25, 22, &[(b"BOOTX64.EFI", 31, 4, false)]);
     write_subdirectory(&mut b, 26, 20, &[(b"INFO", 33, 16, false)]);
+    if with_grub {
+        write_subdirectory(&mut b, 35, 20, &[(b"GRUB", 36, SECTOR as u32, true)]);
+        write_subdirectory(
+            &mut b,
+            36,
+            35,
+            &[(b"GRUB.CFG", 37, GRUB_CFG.len() as u32, false)],
+        );
+        b.data[37 * SECTOR..37 * SECTOR + GRUB_CFG.len()].copy_from_slice(GRUB_CFG);
+    }
 
     b.data[31 * SECTOR..31 * SECTOR + EFI_BOOT.len()].copy_from_slice(EFI_BOOT);
     b.data[32 * SECTOR..32 * SECTOR + ISOLINUX_CFG.len()].copy_from_slice(ISOLINUX_CFG);
