@@ -1,15 +1,18 @@
 //! End-to-end extraction against the synthetic ISO fixture.
 
 use image2usb_core::{
-    CancelToken, Error, FileDevice, NoopSink, PartitionScheme, RawIo, VerifyMode, WriteOptions,
+    CancelToken, Error, FileDevice, FileSystemChoice, NoopSink, PartitionScheme, RawIo, VerifyMode,
+    WriteOptions,
 };
 use image2usb_extract::{
-    extract_image, list_extracted, plan_gpt_layout, plan_layout, preview, read_extracted,
+    extract_image, extract_windows_fat32, list_extracted, plan_gpt_layout, plan_layout,
+    prepare_windows, preview, read_extracted,
 };
 use image2usb_iso::analyze_path;
 use image2usb_testiso::{
-    DISK_INFO, EFI_BOOT, GRUB_CFG, ISOLINUX_CFG, build_image, build_image_with_grub,
-    build_image_with_large_file, build_image_with_symlink,
+    DISK_INFO, EFI_BOOT, GRUB_CFG, ISOLINUX_CFG, WindowsFixture, build_image,
+    build_image_with_grub, build_image_with_large_file, build_image_with_symlink,
+    build_windows_image,
 };
 
 #[test]
@@ -634,6 +637,201 @@ const ESP_TYPE_GUID_FOR_TEST: [u8; 16] = [
 ];
 
 #[test]
+fn extracts_windows_x64_tree_into_fat32_and_verifies_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let iso = dir.path().join("win11.iso");
+    build_windows_image(&iso, WindowsFixture::X64Wim);
+    let source_before = std::fs::read(&iso).unwrap();
+    let info = analyze_path(&iso).unwrap();
+    assert_eq!(info.distro, image2usb_iso::Distro::Windows);
+
+    let disk = dir.path().join("disk.img");
+    std::fs::write(&disk, vec![0u8; 96 * 1024 * 1024]).unwrap();
+    let mut device = FileDevice::open(&disk).unwrap();
+    let layout = plan_layout(device.size(), device.logical_sector_size()).unwrap();
+    let options = WriteOptions {
+        verify: VerifyMode::Sha256,
+        label: String::new(),
+        ..WriteOptions::default()
+    };
+    let stats = extract_image(
+        &iso,
+        &info,
+        &mut device,
+        &options,
+        &CancelToken::new(),
+        &NoopSink,
+    )
+    .unwrap();
+    assert_eq!(stats.files, 5);
+    assert!(stats.bytes > 4096);
+    assert!(
+        stats
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("UEFI-only")),
+        "{:?}",
+        stats.warnings
+    );
+    assert!(
+        !stats
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("GRUB")),
+        "{:?}",
+        stats.warnings
+    );
+
+    let entries = list_extracted(&mut device, &layout).unwrap();
+    let names: Vec<&str> = entries.iter().map(|(path, _)| path.as_str()).collect();
+    for required in [
+        "BOOTMGR",
+        "BOOT/BCD",
+        "EFI/BOOT/BOOTX64.EFI",
+        "SOURCES/INSTALL.WIM",
+        "SOURCES/IDWBINFO.TXT",
+    ] {
+        assert!(names.contains(&required), "missing {required}: {names:?}");
+    }
+    let efi = read_extracted(&mut device, &layout, "EFI/BOOT/BOOTX64.EFI").unwrap();
+    assert_eq!(&efi[..2], b"MZ");
+    let install = read_extracted(&mut device, &layout, "SOURCES/INSTALL.WIM").unwrap();
+    assert_eq!(install.len(), 4096);
+    assert_eq!(std::fs::read(&iso).unwrap(), source_before);
+    assert!(
+        !names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case("AUTOUNATTEND.XML")),
+        "default extraction must not add Windows customization: {names:?}"
+    );
+
+    let mut mbr = [0u8; 512];
+    device.read_exact_at(0, &mut mbr).unwrap();
+    assert_eq!(mbr[446 + 4], 0x0C);
+}
+
+#[test]
+fn windows_preparation_rejects_ambiguous_or_linked_paths_before_any_write() {
+    for (fixture, expected) in [
+        (WindowsFixture::CaseCollision, "ambiguous by case"),
+        (WindowsFixture::Symlink, "symlink"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let iso = dir.path().join("windows.iso");
+        build_windows_image(&iso, fixture);
+        let info = analyze_path(&iso).unwrap();
+        let disk = dir.path().join("disk.img");
+        std::fs::write(&disk, vec![0u8; 96 * 1024 * 1024]).unwrap();
+        let mut device = FileDevice::open(&disk).unwrap();
+        let error = extract_image(
+            &iso,
+            &info,
+            &mut device,
+            &WriteOptions::default(),
+            &CancelToken::new(),
+            &NoopSink,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(expected), "{fixture:?}: {error}");
+        let mut first = [0u8; 512];
+        device.read_exact_at(0, &mut first).unwrap();
+        assert_eq!(first, [0u8; 512], "{fixture:?}");
+    }
+}
+
+#[test]
+fn source_changes_after_snapshot_do_not_affect_the_committed_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let iso = dir.path().join("windows.iso");
+    build_windows_image(&iso, WindowsFixture::X64Wim);
+    let prepared = prepare_windows(&iso, &CancelToken::new(), &NoopSink).unwrap();
+
+    std::fs::write(&iso, b"source replaced after the snapshot").unwrap();
+
+    let disk = dir.path().join("disk.img");
+    std::fs::write(&disk, vec![0u8; 96 * 1024 * 1024]).unwrap();
+    let mut device = FileDevice::open(&disk).unwrap();
+    let layout = plan_layout(device.size(), device.logical_sector_size()).unwrap();
+    let stats = extract_windows_fat32(
+        &prepared,
+        &mut device,
+        &WriteOptions {
+            verify: VerifyMode::Sha256,
+            ..WriteOptions::default()
+        },
+        &CancelToken::new(),
+        &NoopSink,
+    )
+    .unwrap();
+    assert_eq!(stats.files, 5);
+    let install = read_extracted(&mut device, &layout, "SOURCES/INSTALL.WIM").unwrap();
+    assert_eq!(install.len(), 4096);
+    assert!(install[..2048].iter().all(|byte| *byte == 0x43));
+    assert!(install[2048..].iter().all(|byte| *byte == 0x44));
+}
+
+#[test]
+fn windows_preparation_rejects_incomplete_boot_chain_before_any_write() {
+    for fixture in [
+        WindowsFixture::MissingBootmgr,
+        WindowsFixture::MissingBcd,
+        WindowsFixture::UnknownArchitecture,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let iso = dir.path().join("windows.iso");
+        build_windows_image(&iso, fixture);
+        let info = analyze_path(&iso).unwrap();
+        let disk = dir.path().join("disk.img");
+        std::fs::write(&disk, vec![0u8; 96 * 1024 * 1024]).unwrap();
+        let mut device = FileDevice::open(&disk).unwrap();
+        let error = extract_image(
+            &iso,
+            &info,
+            &mut device,
+            &WriteOptions::default(),
+            &CancelToken::new(),
+            &NoopSink,
+        )
+        .unwrap_err();
+        let message = error.to_string().to_ascii_lowercase();
+        assert!(
+            matches!(fixture, WindowsFixture::UnknownArchitecture)
+                && message.contains("pe machine")
+                || message.contains("bootmgr")
+                || message.contains("bcd"),
+            "{fixture:?}: {error}"
+        );
+        let mut first = [0u8; 512];
+        device.read_exact_at(0, &mut first).unwrap();
+        assert_eq!(first, [0u8; 512], "{fixture:?}");
+    }
+}
+
+#[test]
+fn windows_extraction_fails_before_writing_when_target_is_too_small() {
+    let dir = tempfile::tempdir().unwrap();
+    let iso = dir.path().join("windows.iso");
+    build_windows_image(&iso, WindowsFixture::X64Wim);
+    let info = analyze_path(&iso).unwrap();
+    let disk = dir.path().join("disk.img");
+    std::fs::write(&disk, vec![0u8; 32 * 1024 * 1024]).unwrap();
+    let mut device = FileDevice::open(&disk).unwrap();
+    let error = extract_image(
+        &iso,
+        &info,
+        &mut device,
+        &WriteOptions::default(),
+        &CancelToken::new(),
+        &NoopSink,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("at least"), "{error}");
+    let mut first = [0u8; 512];
+    device.read_exact_at(0, &mut first).unwrap();
+    assert_eq!(first, [0u8; 512]);
+}
+
+#[test]
 fn rejects_windows_media_before_touching_the_device() {
     // The fixture is not Windows media, so this only checks that a non-FAT32
     // filesystem is refused before any write happens.
@@ -646,7 +844,7 @@ fn rejects_windows_media_before_touching_the_device() {
     std::fs::write(&disk, vec![0u8; 96 * 1024 * 1024]).unwrap();
     let mut device = FileDevice::open(&disk).unwrap();
     let options = WriteOptions {
-        filesystem: image2usb_core::FileSystem::Ntfs,
+        filesystem: FileSystemChoice::Ntfs,
         ..WriteOptions::default()
     };
     let err = extract_image(

@@ -20,7 +20,8 @@ pub use device::{Bus, DeviceId, DeviceInfo, IdentityToken};
 pub use error::{Error, Result};
 pub use io::{FileDevice, RawIo};
 pub use plan::{
-    FileSystem, PartitionScheme, ResolvedMode, VerifyMode, WriteMode, WriteOptions, WritePlan,
+    FileSystem, FileSystemChoice, PartitionScheme, ResolvedMode, VerifyMode, WindowsOptions,
+    WriteMode, WriteOptions, WritePlan,
 };
 pub use progress::{CallbackSink, ChannelSink, NoopSink, Phase, ProgressEvent, ProgressSink};
 pub use safety::{SafetyError, check_target};

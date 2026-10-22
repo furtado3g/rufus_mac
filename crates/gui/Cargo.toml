@@ -12,6 +12,9 @@ description = "image2usb graphical interface"
 name = "image2usb-gui"
 path = "src/main.rs"
 
+[features]
+windows-media = ["image2usb-extract/windows-media"]
+
 [dependencies]
 image2usb-core.workspace = true
 image2usb-platform.workspace = true

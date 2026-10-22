@@ -12,6 +12,9 @@ description = "image2usb command line interface"
 name = "image2usb"
 path = "src/main.rs"
 
+[features]
+windows-media = ["image2usb-extract/windows-media"]
+
 [dependencies]
 image2usb-core.workspace = true
 image2usb-platform.workspace = true
@@ -22,6 +25,10 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 ctrlc = "3"
+
+[dev-dependencies]
+tempfile.workspace = true
+image2usb-testiso = { path = "../testiso" }
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

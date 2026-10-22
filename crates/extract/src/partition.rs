@@ -12,7 +12,7 @@
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
-use image2usb_core::RawIo;
+use image2usb_core::{Error, RawIo, Result};
 
 /// Cache window size. Windows are aligned to this value inside the partition.
 const WINDOW: u64 = 2 * 1024 * 1024;
@@ -185,6 +185,46 @@ impl Seek for PartitionIo<'_> {
         }
         self.pos = target as u64;
         Ok(self.pos)
+    }
+}
+
+impl RawIo for PartitionIo<'_> {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize> {
+        if offset >= self.len || buf.is_empty() {
+            return Ok(0);
+        }
+        let count = buf.len().min((self.len - offset) as usize);
+        self.seek(SeekFrom::Start(offset)).map_err(Error::Io)?;
+        self.read_exact(&mut buf[..count]).map_err(Error::Io)?;
+        Ok(count)
+    }
+
+    fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if offset > self.len || buf.len() as u64 > self.len - offset {
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "write past the end of the partition",
+            )));
+        }
+        self.seek(SeekFrom::Start(offset)).map_err(Error::Io)?;
+        self.write_all(buf).map_err(Error::Io)?;
+        Ok(buf.len())
+    }
+
+    fn size(&self) -> u64 {
+        self.len
+    }
+
+    fn logical_sector_size(&self) -> u32 {
+        self.device.logical_sector_size()
+    }
+
+    fn sync(&mut self) -> Result<()> {
+        self.flush().map_err(Error::Io)?;
+        self.device.sync()
     }
 }
 

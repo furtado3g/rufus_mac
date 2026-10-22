@@ -30,8 +30,12 @@ struct Builder {
 
 impl Builder {
     fn new() -> Self {
+        Self::with_sectors(SECTORS)
+    }
+
+    fn with_sectors(sectors: usize) -> Self {
         Self {
-            data: vec![0u8; SECTOR * SECTORS],
+            data: vec![0u8; SECTOR * sectors],
         }
     }
 
@@ -75,7 +79,6 @@ fn dir_record(name: &[u8], extent: u32, len: u32, is_dir: bool) -> Vec<u8> {
 }
 
 fn write_root_directory(builder: &mut Builder, sector: usize, extra: &[Vec<u8>]) {
-    let mut offset = 0;
     let mut entries = vec![
         dir_record(&[0x00], sector as u32, SECTOR as u32, true),
         dir_record(&[0x01], sector as u32, SECTOR as u32, true),
@@ -85,9 +88,14 @@ fn write_root_directory(builder: &mut Builder, sector: usize, extra: &[Vec<u8>])
         dir_record(b".DISK", 26, SECTOR as u32, true),
     ];
     entries.extend(extra.iter().cloned());
-    for entry in entries {
+    write_directory_records(builder, sector, &entries);
+}
+
+fn write_directory_records(builder: &mut Builder, sector: usize, records: &[Vec<u8>]) {
+    let mut offset = 0;
+    for entry in records {
         let start = sector * SECTOR + offset;
-        builder.data[start..start + entry.len()].copy_from_slice(&entry);
+        builder.data[start..start + entry.len()].copy_from_slice(entry);
         offset += entry.len();
     }
 }
@@ -98,7 +106,6 @@ fn write_subdirectory(
     parent: u32,
     entries: &[(&[u8], u32, u32, bool)],
 ) {
-    let mut offset = 0;
     let mut records = vec![
         dir_record(&[0x00], sector as u32, SECTOR as u32, true),
         dir_record(&[0x01], parent, SECTOR as u32, true),
@@ -106,20 +113,20 @@ fn write_subdirectory(
     for (name, extent, len, is_dir) in entries {
         records.push(dir_record(name, *extent, *len, *is_dir));
     }
-    for record in records {
-        let start = sector * SECTOR + offset;
-        builder.data[start..start + record.len()].copy_from_slice(&record);
-        offset += record.len();
-    }
+    write_directory_records(builder, sector, &records);
 }
 
 fn write_pvd(builder: &mut Builder) {
+    write_pvd_for(builder, SECTORS, "TESTISO");
+}
+
+fn write_pvd_for(builder: &mut Builder, sectors: usize, volume_id: &str) {
     let mut pvd = [0u8; SECTOR];
     pvd[0] = 1;
     pvd[1..6].copy_from_slice(b"CD001");
     pvd[6] = 1;
-    pvd[40..47].copy_from_slice(b"TESTISO");
-    pvd[80..84].copy_from_slice(&(SECTORS as u32).to_le_bytes());
+    pvd[40..40 + volume_id.len()].copy_from_slice(volume_id.as_bytes());
+    pvd[80..84].copy_from_slice(&(sectors as u32).to_le_bytes());
     pvd[128..130].copy_from_slice(&2048u16.to_le_bytes());
     let root = dir_record(&[0x00], 20, SECTOR as u32, true);
     pvd[156..156 + root.len()].copy_from_slice(&root);
@@ -211,6 +218,11 @@ pub fn build_image_with_large_file(path: &Path, len: u32) {
         true,
         vec![dir_record(b"HUGE.BIN", 34, len, false)],
     );
+    // The declared extent must exist in the source so the catalog can validate
+    // it. Keep the tail sparse: this fixture is about destination capacity,
+    // not about allocating hundreds of megabytes in the test suite.
+    let file = OpenOptions::new().write(true).open(path).unwrap();
+    file.set_len(34 * SECTOR as u64 + u64::from(len)).unwrap();
 }
 
 fn build_image_with_root_extra(path: &Path, platform: u8, hybrid: bool, extra: Vec<Vec<u8>>) {
@@ -254,6 +266,148 @@ fn build_image_with_root_extra_and_grub(
     b.data[31 * SECTOR..31 * SECTOR + EFI_BOOT.len()].copy_from_slice(EFI_BOOT);
     b.data[32 * SECTOR..32 * SECTOR + ISOLINUX_CFG.len()].copy_from_slice(ISOLINUX_CFG);
     b.data[33 * SECTOR..33 * SECTOR + DISK_INFO.len()].copy_from_slice(DISK_INFO);
+    b.build(path);
+}
+
+/// Variants used by Windows-preparation regression tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowsFixture {
+    X64Wim,
+    Arm64Wim,
+    MissingBootmgr,
+    MissingBcd,
+    UnknownArchitecture,
+    MultiExtentWim,
+    Swm,
+    Esd,
+    CaseCollision,
+    Symlink,
+}
+
+/// Build a small Windows-shaped ISO 9660/Joliet image.
+///
+/// The fixture has no real WIM payload. It exercises the boot-chain,
+/// architecture and catalog paths; it is never used as evidence that Windows
+/// setup boots.
+pub fn build_windows_image(path: &Path, fixture: WindowsFixture) {
+    const SECTORS: usize = 128;
+    let mut b = Builder::with_sectors(SECTORS);
+    write_mbr(&mut b, false, false);
+    write_pvd_for(&mut b, SECTORS, "WIN11");
+    write_boot_record(&mut b);
+    write_terminator(&mut b);
+    write_catalog(&mut b, 0xEF);
+
+    let (fallback_name, machine) = match fixture {
+        WindowsFixture::Arm64Wim => (b"BOOTAA64.EFI".as_slice(), 0xAA64u16),
+        WindowsFixture::UnknownArchitecture => (b"BOOTX64.EFI".as_slice(), 0x1234u16),
+        _ => (b"BOOTX64.EFI".as_slice(), 0x8664u16),
+    };
+    let include_bootmgr = fixture != WindowsFixture::MissingBootmgr;
+    let include_bcd = fixture != WindowsFixture::MissingBcd;
+
+    let mut root = vec![
+        dir_record(&[0x00], 20, SECTOR as u32, true),
+        dir_record(&[0x01], 20, SECTOR as u32, true),
+        dir_record(b"EFI", 22, SECTOR as u32, true),
+        dir_record(b"BOOT", 38, SECTOR as u32, true),
+        dir_record(b"SOURCES", 39, SECTOR as u32, true),
+    ];
+    if include_bootmgr {
+        root.push(dir_record(b"BOOTMGR", 30, 512, false));
+    }
+    write_directory_records(&mut b, 20, &root);
+
+    write_subdirectory(&mut b, 22, 20, &[(b"BOOT", 25, SECTOR as u32, true)]);
+    write_subdirectory(&mut b, 25, 22, &[(fallback_name, 31, 512, false)]);
+
+    let mut boot = Vec::new();
+    if include_bcd {
+        boot.push((b"BCD".as_slice(), 40u32, 64u32, false));
+    }
+    write_subdirectory(&mut b, 38, 20, &boot);
+
+    let idwbinfo = format!(
+        "[BUILDINFO]\nBuildArch={}\nBuildNumber=19041\nBuildVersion=10.0.19041.1\n\
+         EditionID=Professional\n",
+        if fixture == WindowsFixture::Arm64Wim {
+            12
+        } else {
+            9
+        }
+    );
+    b.data[41 * SECTOR..41 * SECTOR + idwbinfo.len()].copy_from_slice(idwbinfo.as_bytes());
+
+    let mut sources = vec![(
+        b"IDWBINFO.TXT".as_slice(),
+        41u32,
+        idwbinfo.len() as u32,
+        false,
+    )];
+    match fixture {
+        WindowsFixture::Swm => {
+            sources.push((b"INSTALL.SWM".as_slice(), 43, SECTOR as u32, false));
+            sources.push((b"INSTALL2.SWM".as_slice(), 44, SECTOR as u32, false));
+        }
+        WindowsFixture::Esd => {
+            sources.push((b"INSTALL.ESD".as_slice(), 43, 4096, false));
+        }
+        WindowsFixture::X64Wim
+        | WindowsFixture::Arm64Wim
+        | WindowsFixture::MissingBootmgr
+        | WindowsFixture::MissingBcd
+        | WindowsFixture::UnknownArchitecture => {
+            sources.push((b"INSTALL.WIM".as_slice(), 43, 4096, false));
+        }
+        WindowsFixture::MultiExtentWim
+        | WindowsFixture::CaseCollision
+        | WindowsFixture::Symlink => {}
+    }
+    write_subdirectory(&mut b, 39, 20, &sources);
+    if fixture == WindowsFixture::CaseCollision {
+        let records = vec![
+            dir_record(&[0x00], 39, SECTOR as u32, true),
+            dir_record(&[0x01], 20, SECTOR as u32, true),
+            dir_record(b"IDWBINFO.TXT", 41, idwbinfo.len() as u32, false),
+            dir_record(b"INSTALL.WIM", 43, SECTOR as u32, false),
+            dir_record(b"install.wim", 44, SECTOR as u32, false),
+        ];
+        write_directory_records(&mut b, 39, &records);
+    }
+    if fixture == WindowsFixture::Symlink {
+        let records = vec![
+            dir_record(&[0x00], 39, SECTOR as u32, true),
+            dir_record(&[0x01], 20, SECTOR as u32, true),
+            dir_record(b"IDWBINFO.TXT", 41, idwbinfo.len() as u32, false),
+            dir_record(b"INSTALL.WIM", 43, 4096, false),
+            symlink_record(b"LINK", "BOOTMGR"),
+        ];
+        write_directory_records(&mut b, 39, &records);
+    }
+    if fixture == WindowsFixture::MultiExtentWim {
+        let mut first = dir_record(b"INSTALL.WIM", 43, SECTOR as u32, false);
+        first[25] |= 0x80;
+        let second = dir_record(b"INSTALL.WIM", 44, SECTOR as u32, false);
+        let records = vec![
+            dir_record(&[0x00], 39, SECTOR as u32, true),
+            dir_record(&[0x01], 20, SECTOR as u32, true),
+            dir_record(b"IDWBINFO.TXT", 41, idwbinfo.len() as u32, false),
+            first,
+            second,
+        ];
+        write_directory_records(&mut b, 39, &records);
+    }
+
+    let mut pe = [0u8; 512];
+    pe[0..2].copy_from_slice(b"MZ");
+    pe[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());
+    pe[0x80..0x84].copy_from_slice(b"PE\0\0");
+    pe[0x84..0x86].copy_from_slice(&machine.to_le_bytes());
+    b.data[30 * SECTOR..30 * SECTOR + pe.len()].copy_from_slice(&pe);
+    b.data[31 * SECTOR..31 * SECTOR + pe.len()].copy_from_slice(&pe);
+    b.data[40 * SECTOR..40 * SECTOR + 64].fill(0x5A);
+    b.data[43 * SECTOR..44 * SECTOR].fill(0x43);
+    b.data[44 * SECTOR..45 * SECTOR].fill(0x44);
     b.build(path);
 }
 

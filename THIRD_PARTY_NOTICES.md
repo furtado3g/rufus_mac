@@ -10,11 +10,14 @@ Exact versions and corresponding source code are published with every release.
 | Rust standard library and crates listed in `Cargo.lock` | MIT / Apache-2.0 (mostly) | runtime |
 | fatfs 0.3 | MIT | FAT32 formatting and file writing for extraction mode |
 | GRUB 2.14 i386-pc BIOS assets (`boot.img`, `core-mbr.img`, `core-gpt.img`) | GPL-3.0-or-later | legacy BIOS bootloader embedded and installed in the pre-partition gap |
-| UEFI:NTFS | GPL-3.0-or-later | NTFS boot support for UEFI (planned) |
+| UEFI:NTFS image (`assets/uefi-ntfs/uefi-ntfs.img`) | Mixed: loader GPL-2.0-or-later; NTFS driver and EfiFs require file-level audit | NTFS boot support for UEFI; embedded only in opt-in `windows-media` builds |
 | wimlib | LGPL-3.0-or-later | WIM splitting for Windows images (planned) |
 
-At the time of writing, Rust crates and the GRUB BIOS assets are bundled. The
-UEFI:NTFS and WIM components are planned for Windows media support.
+At the time of writing, Rust crates, the GRUB BIOS assets and the pinned
+UEFI:NTFS image are bundled. The UEFI:NTFS component licenses and corresponding
+sources are not yet cleared for public redistribution; see
+`assets/uefi-ntfs/README.md` and `assets/windows-media/manifest.json`. The WIM
+component is still planned.
 
 The GRUB cores embed a small module set (`biosdisk`, `part_msdos`, `part_gpt`,
 `fat`, `search`, `configfile`, `normal`, `linux`, `echo`, `test`) and

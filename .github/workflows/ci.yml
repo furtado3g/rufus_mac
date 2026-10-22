@@ -9,6 +9,38 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  windows-media-macos:
+    name: Windows media native libraries (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - name: Install MacPorts developer prerequisites
+        run: |
+          curl --fail --location --retry 3 -o "$RUNNER_TEMP/macports.pkg" https://github.com/macports/macports-base/releases/download/v2.12.7/MacPorts-2.12.7-14-Sonoma.pkg
+          echo "6e6e8a96f051035b34bf5e4c48f889370056f6139f05029dbc20bedfd1b65c4a  $RUNNER_TEMP/macports.pkg" | shasum -a 256 -c -
+          sudo installer -pkg "$RUNNER_TEMP/macports.pkg" -target /
+          sudo /opt/local/bin/port -N sync
+          sudo /opt/local/bin/port -N install libgcrypt autoconf automake libtool pkgconfig meson ninja
+      - name: Build pinned native resources and check WIM roundtrip
+        run: sh scripts/build-windows-media.sh
+      - name: Native Rust link tests
+        run: |
+          export IMAGE2USB_WINDOWS_MEDIA_PREFIX="$PWD/target/windows-media/$(uname -m)/install"
+          cargo test -p image2usb-platform --features windows-media --test media
+          cargo clippy -p image2usb-platform --all-targets --features windows-media -- -D warnings
+      - name: Windows NTFS/UEFI:NTFS synthetic commit tests
+        run: |
+          export IMAGE2USB_WINDOWS_MEDIA_PREFIX="$PWD/target/windows-media/$(uname -m)/install"
+          cargo test -p image2usb-extract --features windows-media
+          cargo clippy -p image2usb-extract --features windows-media --tests -- -D warnings
+
   test:
     name: test (${{ matrix.os }})
     strategy:

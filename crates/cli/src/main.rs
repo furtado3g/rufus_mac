@@ -10,11 +10,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use clap::{Parser, Subcommand, ValueEnum};
 use image2usb_core::{
-    CancelToken, DeviceInfo, Error, FileDevice, PartitionScheme, Phase, ProgressEvent,
-    ProgressSink, RawIo, ResolvedMode, Result, SafetyError, VerifyMode, WriteOptions, check_target,
-    verify_image, write_image,
+    CancelToken, DeviceInfo, Error, FileDevice, FileSystem as FilesystemKind, FileSystemChoice,
+    PartitionScheme, Phase, ProgressEvent, ProgressSink, RawIo, ResolvedMode, Result, SafetyError,
+    VerifyMode, WriteOptions, check_target, verify_image, write_image,
 };
-use image2usb_extract::extract_image;
+use image2usb_extract::{WINDOWS_NTFS_SUPPORTED, extract_image, prepare_windows};
 use image2usb_iso::{IsoInfo, analyze_path};
 use image2usb_platform::native;
 
@@ -78,7 +78,10 @@ enum Command {
         /// Partition table for extraction (default: mbr).
         #[arg(long, value_enum, default_value_t = SchemeArg::Mbr)]
         scheme: SchemeArg,
-        /// FAT32 volume label for extraction mode (default: ISO volume ID).
+        /// Filesystem for extraction mode (default: auto).
+        #[arg(long, value_enum, default_value_t = FilesystemArg::Auto)]
+        filesystem: FilesystemArg,
+        /// Volume label for extraction mode (default: ISO volume ID).
         #[arg(long)]
         label: Option<String>,
         /// Read the device back and compare it with the image. In extraction
@@ -99,6 +102,23 @@ enum ModeArg {
 enum SchemeArg {
     Mbr,
     Gpt,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum FilesystemArg {
+    Auto,
+    Fat32,
+    Ntfs,
+}
+
+impl From<FilesystemArg> for FileSystemChoice {
+    fn from(value: FilesystemArg) -> Self {
+        match value {
+            FilesystemArg::Auto => FileSystemChoice::Auto,
+            FilesystemArg::Fat32 => FileSystemChoice::Fat32,
+            FilesystemArg::Ntfs => FileSystemChoice::Ntfs,
+        }
+    }
 }
 
 impl From<SchemeArg> for PartitionScheme {
@@ -138,10 +158,11 @@ fn run(command: Command) -> Result<()> {
             dry_run,
             mode,
             scheme,
+            filesystem,
             label,
             verify,
         } => write(
-            &iso, device, output, yes, dry_run, mode, scheme, label, verify,
+            &iso, device, output, yes, dry_run, mode, scheme, filesystem, label, verify,
         ),
     }
 }
@@ -312,12 +333,16 @@ fn write(
     dry_run: bool,
     mode: ModeArg,
     scheme: SchemeArg,
+    filesystem: FilesystemArg,
     label: Option<String>,
     verify: bool,
 ) -> Result<()> {
     let info = analyze_iso(iso)?;
     let image_len = info.size;
     let resolved = resolve_mode(mode, &info);
+    let requested_filesystem = FileSystemChoice::from(filesystem);
+    let (resolved_filesystem, filesystem_reason) =
+        image2usb_extract::resolve_filesystem(requested_filesystem, resolved, &info)?;
     let verify_mode = if verify {
         VerifyMode::Sha256
     } else {
@@ -325,6 +350,7 @@ fn write(
     };
     let options = WriteOptions {
         scheme: scheme.into(),
+        filesystem: resolved_filesystem.into(),
         label: label.unwrap_or_default(),
         verify: verify_mode,
         ..WriteOptions::default()
@@ -351,9 +377,25 @@ fn write(
             options.filesystem,
             label_for(&options, &info)
         );
+        println!(
+            "Filesystem: requested {}, resolved {} — {}",
+            requested_filesystem, options.filesystem, filesystem_reason
+        );
     }
     for warning in &info.warnings {
         println!("warning: {warning}");
+    }
+
+    if resolved == ResolvedMode::Extract
+        && options.filesystem.resolved() == Some(FilesystemKind::Ntfs)
+        && !WINDOWS_NTFS_SUPPORTED
+    {
+        return Err(Error::Unsupported(
+            "NTFS/UEFI:NTFS extraction is not available in this build; use a build with the \
+             windows-media feature on macOS. NTFS was selected, so the operation stopped before \
+             preparing or writing the target"
+                .to_owned(),
+        ));
     }
 
     // Extraction needs room for the FAT tables, directory entries and the full
@@ -370,13 +412,42 @@ fn write(
         println!();
         println!("Dry run: no data will be written.");
         if resolved == ResolvedMode::Extract {
-            let (files, dirs, bytes) = image2usb_extract::preview(iso)?;
-            println!(
-                "Would extract {} files ({} directories, {}) from the ISO tree.",
-                files,
-                dirs,
-                image2usb_core::util::format_bytes(bytes)
-            );
+            if info.distro == image2usb_iso::Distro::Windows {
+                let cancel = CancelToken::new();
+                let sink = CliSink::new();
+                let prepared = prepare_windows(iso, &cancel, &sink)?;
+                let files = prepared
+                    .catalog
+                    .iter()
+                    .filter(|entry| !entry.is_dir)
+                    .count();
+                let dirs = prepared.catalog.iter().filter(|entry| entry.is_dir).count();
+                let bytes = prepared
+                    .catalog
+                    .iter()
+                    .filter(|entry| !entry.is_dir)
+                    .map(|entry| entry.len)
+                    .sum::<u64>();
+                println!(
+                    "Windows preparation passed: {} files ({} directories, {}) from the private \
+                     snapshot.",
+                    files,
+                    dirs,
+                    image2usb_core::util::format_bytes(bytes)
+                );
+                println!(
+                    "Scratch: {} (full ISO snapshot; removed after this dry run).",
+                    image2usb_core::util::format_bytes(prepared.scratch_bytes())
+                );
+            } else {
+                let (files, dirs, bytes) = image2usb_extract::preview(iso)?;
+                println!(
+                    "Would extract {} files ({} directories, {}) from the ISO tree.",
+                    files,
+                    dirs,
+                    image2usb_core::util::format_bytes(bytes)
+                );
+            }
         }
         if let Some(device) = &device {
             let target = find_device(device)?;
@@ -392,6 +463,7 @@ fn write(
     }
 
     if let Some(output) = output {
+        ensure_output_is_not_source(iso, &output)?;
         // Writing to an existing file destroys its contents, so require the
         // same explicit opt-in as writing to a device. Creating a new file is
         // not destructive and does not need `--yes`.
@@ -401,6 +473,9 @@ fn write(
                 output.display()
             )));
         }
+        // Revalidate immediately before the exclusive open: a symlink or hard
+        // link could have replaced the path since the first check.
+        ensure_output_is_not_source(iso, &output)?;
         let mut target = match resolved {
             ResolvedMode::Dd => open_output(&output, image_len)?,
             ResolvedMode::Extract => open_output_existing(&output, required)?,
@@ -608,6 +683,46 @@ fn confirm(target: &DeviceInfo) -> Result<()> {
     }
 }
 
+fn ensure_output_is_not_source(iso: &Path, output: &Path) -> Result<()> {
+    let iso_metadata = std::fs::metadata(iso)?;
+    if output.exists() {
+        let output_metadata = std::fs::metadata(output)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if iso_metadata.dev() == output_metadata.dev()
+                && iso_metadata.ino() == output_metadata.ino()
+            {
+                return Err(Error::Other(format!(
+                    "refusing to write to {}: it is the source image (including hard links)",
+                    output.display()
+                )));
+            }
+        }
+        let iso_canonical = iso.canonicalize()?;
+        let output_canonical = output.canonicalize()?;
+        if iso_canonical == output_canonical {
+            return Err(Error::Other(format!(
+                "refusing to write to {}: it resolves to the source image",
+                output.display()
+            )));
+        }
+    } else {
+        let parent = output.parent().unwrap_or_else(|| Path::new("."));
+        let parent = parent.canonicalize()?;
+        let Some(name) = output.file_name() else {
+            return Err(Error::Other("--output has no file name".to_owned()));
+        };
+        if parent.join(name) == iso.canonicalize()? {
+            return Err(Error::Other(format!(
+                "refusing to write to {}: it resolves to the source image",
+                output.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn open_output(path: &Path, len: u64) -> Result<FileDevice> {
     if !path.exists() {
         let file = File::create(path)?;
@@ -675,10 +790,7 @@ impl CliSink {
 
 impl ProgressSink for CliSink {
     fn report(&self, event: ProgressEvent) {
-        let is_data_phase = matches!(
-            event.phase,
-            Phase::Writing | Phase::Copying | Phase::Verifying
-        );
+        let is_data_phase = event.phase.is_data();
         if !is_data_phase || event.total_bytes == 0 {
             eprintln!("{}", event.summary());
             return;
@@ -756,9 +868,106 @@ fn hint_for(err: &Error) -> Option<&'static str> {
         Error::ExtractionTooLarge { .. } => {
             Some("use a larger USB drive or choose DD mode for this image")
         }
-        Error::Unsupported(message) if message.contains("Windows") => {
-            Some("use --mode dd for Windows media (UEFI boot only) or wait for split-WIM support")
-        }
+        Error::Unsupported(message) if message.contains("Windows") => Some(
+            "use a macOS build with windows-media for NTFS/UEFI:NTFS, or --mode dd for a Windows ISO",
+        ),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image2usb_testiso::{WindowsFixture, build_image, build_windows_image};
+
+    #[test]
+    fn filesystem_resolution_keeps_fat32_for_windows_auto() {
+        let dir = tempfile::tempdir().unwrap();
+        let windows = dir.path().join("windows.iso");
+        build_windows_image(&windows, WindowsFixture::X64Wim);
+        let info = analyze_iso(&windows).unwrap();
+        let (filesystem, reason) = image2usb_extract::resolve_filesystem(
+            FileSystemChoice::Auto,
+            ResolvedMode::Extract,
+            &info,
+        )
+        .unwrap();
+        assert_eq!(filesystem, FilesystemKind::Fat32);
+        assert!(reason.contains("fits FAT32"), "{reason}");
+
+        let linux = dir.path().join("linux.iso");
+        build_image(&linux, 0xEF, false);
+        let info = analyze_iso(&linux).unwrap();
+        let (filesystem, _) = image2usb_extract::resolve_filesystem(
+            FileSystemChoice::Auto,
+            ResolvedMode::Extract,
+            &info,
+        )
+        .unwrap();
+        assert_eq!(filesystem, FilesystemKind::Fat32);
+    }
+
+    #[test]
+    fn explicit_ntfs_for_linux_and_filesystem_in_dd_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let linux = dir.path().join("linux.iso");
+        build_image(&linux, 0xEF, false);
+        let info = analyze_iso(&linux).unwrap();
+        assert!(
+            image2usb_extract::resolve_filesystem(
+                FileSystemChoice::Ntfs,
+                ResolvedMode::Extract,
+                &info
+            )
+            .is_err()
+        );
+        assert!(
+            image2usb_extract::resolve_filesystem(FileSystemChoice::Fat32, ResolvedMode::Dd, &info)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn auto_non_hybrid_windows_uses_extraction_and_dry_run_prepares_without_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let iso = dir.path().join("windows.iso");
+        build_windows_image(&iso, WindowsFixture::X64Wim);
+        let info = analyze_iso(&iso).unwrap();
+        assert_eq!(resolve_mode(ModeArg::Auto, &info), ResolvedMode::Extract);
+        let output = dir.path().join("should-not-exist.img");
+        write(
+            &iso,
+            None,
+            Some(output.clone()),
+            false,
+            true,
+            ModeArg::Auto,
+            SchemeArg::Mbr,
+            FilesystemArg::Auto,
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn output_cannot_resolve_to_the_source_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let iso = dir.path().join("source.iso");
+        std::fs::write(&iso, b"image").unwrap();
+        let direct = dir.path().join("source.iso");
+        assert!(ensure_output_is_not_source(&iso, &direct).is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let link = dir.path().join("link.iso");
+            symlink(&iso, &link).unwrap();
+            assert!(ensure_output_is_not_source(&iso, &link).is_err());
+            let hard = dir.path().join("hard.iso");
+            std::fs::hard_link(&iso, &hard).unwrap();
+            assert!(ensure_output_is_not_source(&iso, &hard).is_err());
+        }
     }
 }

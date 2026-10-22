@@ -17,7 +17,7 @@ use image2usb_core::{
     CancelToken, Error, FileSystem as FilesystemKind, PartitionScheme, Phase, ProgressEvent,
     ProgressSink, RawIo, Result, VerifyMode, WriteOptions, util::format_bytes,
 };
-use image2usb_iso::{IsoInfo, SECTOR_SIZE, WalkEntry, read_volume_descriptors, walk_tree};
+use image2usb_iso::{IsoInfo, WalkEntry, read_volume_descriptors, walk_tree};
 use sha2::{Digest, Sha256};
 
 use crate::gpt::{plan_gpt_layout, write_gpt};
@@ -39,10 +39,10 @@ pub struct ExtractStats {
 }
 
 #[derive(Debug, Clone)]
-struct ManifestEntry {
-    path: String,
-    size: u64,
-    sha256: Option<[u8; 32]>,
+pub(crate) struct ManifestEntry {
+    pub path: String,
+    pub size: u64,
+    pub sha256: Option<[u8; 32]>,
 }
 
 pub fn extract_image(
@@ -53,13 +53,26 @@ pub fn extract_image(
     cancel: &CancelToken,
     sink: &dyn ProgressSink,
 ) -> Result<ExtractStats> {
-    if options.filesystem != FilesystemKind::Fat32 {
+    let filesystem = options.filesystem.resolved().ok_or_else(|| {
+        Error::Unsupported(
+            "filesystem 'auto' must be resolved before extraction reaches the writer".to_owned(),
+        )
+    })?;
+    if info.distro == image2usb_iso::Distro::Windows {
+        let prepared = crate::windows::prepare_windows(iso_path, cancel, sink)?;
+        return match filesystem {
+            FilesystemKind::Fat32 => {
+                crate::windows::extract_windows_fat32(&prepared, device, options, cancel, sink)
+            }
+            FilesystemKind::Ntfs => {
+                crate::windows::extract_windows_ntfs(&prepared, device, options, cancel, sink)
+            }
+        };
+    }
+    if filesystem != FilesystemKind::Fat32 {
         return Err(Error::Unsupported(
             "only FAT32 extraction is implemented in this build".to_owned(),
         ));
-    }
-    if info.distro == image2usb_iso::Distro::Windows {
-        return Err(windows_unsupported());
     }
 
     let started = Instant::now();
@@ -85,8 +98,14 @@ pub fn extract_image(
             .ok_or_else(|| Error::InvalidImage("no primary volume descriptor".to_owned()))?
             .root,
     );
-    let entries =
-        walk_tree(&mut iso, root, descriptors.has_joliet, MAX_ENTRIES).map_err(iso_error)?;
+    let entries = walk_tree(
+        &mut iso,
+        root,
+        descriptors.has_joliet,
+        MAX_ENTRIES,
+        image_len,
+    )
+    .map_err(iso_error)?;
     if entries.is_empty() {
         return Err(Error::InvalidImage(
             "image has no files to extract".to_owned(),
@@ -154,8 +173,8 @@ pub fn extract_image(
     let total_bytes = entries
         .iter()
         .filter(|entry| !entry.is_dir && !entry.is_symlink())
-        .map(|entry| entry.len as u64)
-        .sum::<u64>();
+        .try_fold(0u64, |total, entry| total.checked_add(entry.len))
+        .ok_or_else(|| Error::InvalidImage("image file sizes overflow".to_owned()))?;
 
     // Refuse before the MBR is touched if the tree cannot fit in the FAT32
     // data area. The formatter and the estimate use the same cluster rules.
@@ -220,37 +239,47 @@ pub fn extract_image(
             out.truncate().map_err(|err| fat_error(&dest, err))?;
 
             let mut hasher = (options.verify == VerifyMode::Sha256).then(Sha256::new);
-            iso.seek(SeekFrom::Start(entry.extent as u64 * SECTOR_SIZE))?;
-            let mut remaining = entry.len as u64;
-            let mut buf = vec![0u8; COPY_CHUNK.min(remaining.max(1) as usize)];
-            while remaining > 0 {
-                cancel.check()?;
-                let want = (remaining as usize).min(buf.len());
-                iso.read_exact(&mut buf[..want])?;
-                out.write_all(&buf[..want])
-                    .map_err(|err| fat_error(&dest, err))?;
-                if let Some(hasher) = hasher.as_mut() {
-                    hasher.update(&buf[..want]);
-                }
-                remaining -= want as u64;
-                copied += want as u64;
+            let mut copied_entry = 0u64;
+            for extent in entry.source_extents() {
+                iso.seek(SeekFrom::Start(extent.offset))?;
+                let mut remaining = extent.len;
+                let mut buf = vec![0u8; COPY_CHUNK.min(remaining.max(1) as usize)];
+                while remaining > 0 {
+                    cancel.check()?;
+                    let want = (remaining as usize).min(buf.len());
+                    iso.read_exact(&mut buf[..want])?;
+                    out.write_all(&buf[..want])
+                        .map_err(|err| fat_error(&dest, err))?;
+                    if let Some(hasher) = hasher.as_mut() {
+                        hasher.update(&buf[..want]);
+                    }
+                    remaining -= want as u64;
+                    copied += want as u64;
+                    copied_entry += want as u64;
 
-                let now = Instant::now();
-                if now.duration_since(last_report) >= REPORT_INTERVAL {
-                    sink.report(progress(
-                        Phase::Copying,
-                        copied,
-                        total_progress,
-                        started,
-                        Some(&dest),
-                    ));
-                    last_report = now;
+                    let now = Instant::now();
+                    if now.duration_since(last_report) >= REPORT_INTERVAL {
+                        sink.report(progress(
+                            Phase::Copying,
+                            copied,
+                            total_progress,
+                            started,
+                            Some(&dest),
+                        ));
+                        last_report = now;
+                    }
                 }
+            }
+            if copied_entry != entry.len {
+                return Err(Error::InvalidImage(format!(
+                    "extent lengths for {} do not add up to its declared size",
+                    entry.path
+                )));
             }
             out.flush().map_err(|err| fat_error(&dest, err))?;
             manifest.push(ManifestEntry {
                 path: dest,
-                size: entry.len as u64,
+                size: entry.len,
                 sha256: hasher.map(|h| h.finalize().into()),
             });
         }
@@ -328,7 +357,7 @@ pub fn extract_image(
 
 const PREFLIGHT_MARGIN_CLUSTERS: u64 = 8;
 
-fn check_extraction_space(
+pub(crate) fn check_extraction_space(
     entries: &[WalkEntry],
     layout: &PartitionLayout,
     options: &WriteOptions,
@@ -423,7 +452,7 @@ fn required_data_clusters(entries: &[WalkEntry], cluster: u64) -> u64 {
             // Subdirectories contain `.` and `..`.
             dir_slots.entry(dest).or_insert(2);
         } else {
-            data_clusters = data_clusters.saturating_add(u64::from(entry.len).div_ceil(cluster));
+            data_clusters = data_clusters.saturating_add(entry.len.div_ceil(cluster));
         }
     }
 
@@ -439,7 +468,7 @@ fn entry_slots(name: &str) -> u64 {
     1 + utf16_units.div_ceil(13)
 }
 
-fn format_fat32(
+pub(crate) fn format_fat32(
     part: &mut PartitionIo<'_>,
     layout: &PartitionLayout,
     options: &WriteOptions,
@@ -469,7 +498,7 @@ fn format_fat32(
     Ok(())
 }
 
-fn verify_manifest(
+pub(crate) fn verify_manifest(
     device: &mut dyn RawIo,
     layout: &PartitionLayout,
     manifest: &[ManifestEntry],
@@ -571,6 +600,7 @@ fn progress(
         bytes_per_sec: Some(bps),
         eta,
         message: message.map(str::to_owned),
+        target_incomplete: false,
     }
 }
 
@@ -713,8 +743,14 @@ pub fn preview(iso_path: &Path) -> Result<(u64, u64, u64)> {
             .ok_or_else(|| Error::InvalidImage("no primary volume descriptor".to_owned()))?
             .root,
     );
-    let entries =
-        walk_tree(&mut iso, root, descriptors.has_joliet, MAX_ENTRIES).map_err(iso_error)?;
+    let entries = walk_tree(
+        &mut iso,
+        root,
+        descriptors.has_joliet,
+        MAX_ENTRIES,
+        image_len,
+    )
+    .map_err(iso_error)?;
     if is_windows_payload(&entries) {
         return Err(windows_unsupported());
     }
@@ -731,7 +767,7 @@ pub fn preview(iso_path: &Path) -> Result<(u64, u64, u64)> {
             dirs += 1;
         } else {
             files += 1;
-            bytes += entry.len as u64;
+            bytes += entry.len;
         }
     }
     Ok((files, dirs, bytes))
@@ -813,6 +849,7 @@ mod tests {
             path: "BIG.BIN".to_owned(),
             extent: 0,
             len: 200 * 1024 * 1024,
+            extents: Vec::new(),
             is_dir: false,
             symlink_target: None,
         }];
@@ -844,7 +881,8 @@ mod tests {
         let entries = vec![WalkEntry {
             path: "LINK".to_owned(),
             extent: 0,
-            len: u32::MAX,
+            len: u64::from(u32::MAX),
+            extents: Vec::new(),
             is_dir: false,
             symlink_target: Some("BIG.BIN".to_owned()),
         }];

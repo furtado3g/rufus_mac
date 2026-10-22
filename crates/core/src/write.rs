@@ -71,6 +71,7 @@ pub fn write_image(
         bytes_per_sec: None,
         eta: None,
         message: None,
+        target_incomplete: false,
     });
 
     while done < image_len {
@@ -114,6 +115,7 @@ pub fn write_image(
         bytes_per_sec: bytes_per_sec(image_len, elapsed),
         eta: Some(Duration::ZERO),
         message: None,
+        target_incomplete: false,
     });
 
     Ok(WriteStats {
@@ -193,6 +195,7 @@ pub fn verify_image(
                 bytes_per_sec: bytes_per_sec(done, elapsed),
                 eta: eta(done, image_len, bytes_per_sec(done, elapsed)),
                 message: None,
+                target_incomplete: false,
             });
             last_report = now;
         }
@@ -206,6 +209,7 @@ pub fn verify_image(
         bytes_per_sec: bytes_per_sec(image_len, elapsed),
         eta: Some(Duration::ZERO),
         message: None,
+        target_incomplete: false,
     });
 
     Ok(VerifyStats {
@@ -231,6 +235,7 @@ fn report_progress(
         bytes_per_sec: bps,
         eta: eta(done, total, bps),
         message: None,
+        target_incomplete: false,
     });
     *last_report = now;
 }

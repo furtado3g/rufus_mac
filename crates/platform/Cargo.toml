@@ -8,9 +8,28 @@ authors.workspace = true
 repository.workspace = true
 description = "Platform backends (macOS, Linux, Windows) for image2usb"
 
+[features]
+# Native integration is opt-in until the formatter and media gates pass.
+windows-media = []
+
+[[example]]
+name = "ntfs_fixture"
+required-features = ["windows-media"]
+
+[[example]]
+name = "ntfs_tree"
+required-features = ["windows-media"]
+
+[[example]]
+name = "udf_probe"
+required-features = ["windows-media"]
+
 [dependencies]
+hex.workspace = true
 image2usb-core.workspace = true
 serde.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
@@ -22,9 +41,6 @@ plist.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 serde_json.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

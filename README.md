@@ -9,8 +9,9 @@ external tools required.
 > Status: **pre-alpha** (M4 — legacy BIOS boot). Device enumeration, ISO
 > analysis, DD-mode writing, UEFI extraction and legacy BIOS extraction for
 > GRUB-based Linux images are implemented. MBR and GPT/ESP images boot under
-> QEMU/SeaBIOS and QEMU/OVMF. Windows media and physical-hardware validation are
-> still in progress.
+> QEMU/SeaBIOS and QEMU/OVMF. Windows FAT32 and opt-in macOS NTFS/UEFI:NTFS
+> extraction paths exist synthetically; Windows setup boot and
+> physical-hardware validation are still in progress.
 
 See [ROADMAP.md](ROADMAP.md) for the detailed plan, development setup on another
 machine, and per-milestone acceptance criteria.
@@ -23,9 +24,9 @@ machine, and per-milestone acceptance criteria.
 - [x] Extraction mode: MBR or GPT + FAT32 + files copied from the ISO tree (UEFI and GRUB-based BIOS boot, Linux distros)
 - [x] GPT with a single EFI System Partition (ESP)
 - [x] Legacy BIOS boot through a bundled GRUB 2.14 i386-pc core
-- [ ] NTFS data partitions and a second partition for large trees
+- [ ] NTFS data partition + UEFI:NTFS ESP for large Windows media (opt-in macOS `windows-media` build; boot validation pending)
 - [ ] syslinux-based extraction and Windows BOOTMGR
-- [ ] Windows installation media (wimlib / split-WIM)
+- [ ] Windows WIM split (wimlib)
 - [ ] Windows 11 unattended options (TPM / Secure Boot / offline account bypass)
 - [x] Graphical interface (egui): device picker, ISO analysis, DD and extraction writes
 - [ ] Signed portable artifacts
@@ -66,7 +67,21 @@ that cannot be written 1:1 (non-hybrid ISOs):
 ```console
 $ sudo image2usb write ubuntu-24.04.iso --device /dev/disk4 --mode extract --verify
 $ sudo image2usb write ubuntu-24.04.iso --device /dev/disk4 --mode extract --scheme gpt --verify
+$ sudo image2usb write windows.iso --device /dev/disk4 --mode extract --filesystem ntfs --verify
 ```
+
+`--filesystem ntfs` is available only in a macOS build with the
+`windows-media` feature. Build the pinned native resources and package a
+host-only app with:
+
+```console
+$ sh scripts/build-windows-media.sh
+$ IMAGE2USB_WINDOWS_MEDIA_PREFIX="$PWD/target/windows-media/$(uname -m)/install" \
+    sh scripts/package-macos.sh 0.1.0 --native
+```
+
+The universal app does not include NTFS support until native libraries are
+available for both architectures.
 
 Current limits (M4):
 
@@ -88,10 +103,17 @@ Current limits (M4):
   hashes, build commands, upstream source and the source offer are in
   [assets/grub-bios/README.md](assets/grub-bios/README.md) and
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-- **FAT32 only; one ESP.** GPT mode writes a single EFI System Partition. NTFS
-  and a separate data partition for very large trees are not implemented yet.
-- **Linux/BSD distributions only.** Windows installation media needs wimlib and
-  split-WIM support, which is not implemented yet.
+- **FAT32 by default; opt-in NTFS for Windows.** GPT mode writes a single EFI
+  System Partition for Linux/BSD and small Windows media. A macOS build with
+  the `windows-media` feature can instead write an NTFS data partition plus a
+  1 MiB FAT partition containing the pinned UEFI:NTFS chainloader. This path is
+  currently 512-byte-sector only and has synthetic readback, not Windows setup
+  boot or Secure Boot validation.
+- **Windows media is UEFI-only.** Small media fits FAT32; larger media requires
+  the opt-in NTFS/UEFI:NTFS path. WIM splitting and legacy BIOS BOOTMGR boot are
+  not implemented. UEFI:NTFS asset signatures, DB/DBX and redistribution
+  obligations are still under review; see `assets/uefi-ntfs/README.md`.
+- **Linux/BSD or Windows.** NTFS extraction is refused for non-Windows media.
 - **UDF-only images are rejected.** Hybrid ISO/UDF images are extracted from
   their ISO 9660/Joliet tree with a warning; UDF-only media needs DD mode or a
   future UDF reader.

@@ -10,12 +10,14 @@ mod eltorito;
 mod hybrid;
 mod iso9660;
 
-pub use analyze::{BootFiles, Distro, IsoInfo, WindowsInfo, analyze_path};
+pub use analyze::{
+    BootFiles, Distro, IsoInfo, WindowsArchitecture, WindowsInfo, WindowsPart, analyze_path,
+};
 pub use eltorito::{BootEntry, ElToritoInfo, MediaType, Platform};
 pub use hybrid::{GptInfo, MbrInfo, MbrPartition};
 pub use iso9660::{
-    DirRecord, SECTOR_SIZE, VolumeDescriptors, WalkEntry, read_dir, read_file,
-    read_volume_descriptors, walk_tree,
+    DirRecord, Extent, SECTOR_SIZE, VolumeDescriptors, WalkEntry, read_dir, read_file,
+    read_volume_descriptors, read_walk_entry, walk_tree,
 };
 
 use thiserror::Error;

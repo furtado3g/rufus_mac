@@ -366,7 +366,10 @@ pub fn read_dir(
     if !dir.is_dir() || dir.len == 0 || max_entries == 0 {
         return Ok(Vec::new());
     }
-    let len = (dir.len as usize).min(MAX_DIR_BYTES);
+    if dir.len as usize > MAX_DIR_BYTES {
+        return Err(IsoError::InvalidDirectoryRecord(u64::from(dir.len)));
+    }
+    let len = dir.len as usize;
     let mut data = vec![0u8; len];
     file.seek(SeekFrom::Start(dir.extent as u64 * SECTOR_SIZE))?;
     file.read_exact(&mut data).map_err(|err| {
@@ -402,14 +405,31 @@ pub fn read_dir(
     Ok(out)
 }
 
+/// One contiguous byte range referenced by an ISO 9660 directory record.
+///
+/// Multi-extent files consist of several ranges that must be concatenated in
+/// directory-record order. Offsets are absolute byte offsets, not block
+/// numbers, so they can be consumed by readers with 64-bit offsets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Extent {
+    pub offset: u64,
+    pub len: u64,
+}
+
 /// A flattened directory entry produced by [`walk_tree`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalkEntry {
     /// Path relative to the root, separated by `/` (e.g. `casper/vmlinuz`).
     pub path: String,
-    /// Logical block address of the file or directory data.
-    pub extent: u32,
-    pub len: u32,
+    /// Byte offset of the first extent. Kept for callers with single-extent
+    /// files; `extents` is authoritative for multi-extent files.
+    pub extent: u64,
+    /// Total data length in bytes. For multi-extent files this is the sum of
+    /// every extent, checked for overflow.
+    pub len: u64,
+    /// All source extents in record order. Empty only for entries constructed
+    /// directly by tests, where `extent`/`len` describe one range.
+    pub extents: Vec<Extent>,
     pub is_dir: bool,
     /// Rock Ridge symlink target, when the entry is a symlink.
     pub symlink_target: Option<String>,
@@ -419,40 +439,158 @@ impl WalkEntry {
     pub fn is_symlink(&self) -> bool {
         self.symlink_target.is_some()
     }
+
+    /// Source ranges in file order. Entries built directly by callers without
+    /// an explicit list expose their single `extent`/`len` pair.
+    pub fn source_extents(&self) -> Vec<Extent> {
+        if self.extents.is_empty() {
+            vec![Extent {
+                offset: self.extent,
+                len: self.len,
+            }]
+        } else {
+            self.extents.clone()
+        }
+    }
 }
 
-/// Recursively list a directory tree, parents before children.
+#[derive(Debug)]
+struct GroupedRecord {
+    record: DirRecord,
+    extents: Vec<Extent>,
+}
+
+/// Combine consecutive ISO 9660 records flagged as multi-extent.
+///
+/// The standard requires every record except the last to have flag bit 7 set
+/// and all records to carry the same identifier. A dangling or mismatched
+/// sequence is rejected instead of silently exposing a truncated file.
+fn group_multi_extent(records: Vec<DirRecord>) -> Result<Vec<GroupedRecord>> {
+    let mut out: Vec<GroupedRecord> = Vec::new();
+    let mut pending: Option<GroupedRecord> = None;
+
+    for record in records {
+        let extent = Extent {
+            offset: u64::from(record.extent)
+                .checked_mul(SECTOR_SIZE)
+                .ok_or_else(|| IsoError::Other("ISO extent offset overflow".to_owned()))?,
+            len: u64::from(record.len),
+        };
+        if let Some(group) = pending.as_mut() {
+            if group.record.name != record.name || record.is_dir() {
+                return Err(IsoError::Other(
+                    "invalid ISO multi-extent sequence".to_owned(),
+                ));
+            }
+            group.extents.push(extent);
+            if record.flags & 0x80 == 0 {
+                out.push(pending.take().expect("pending group exists"));
+            }
+            continue;
+        }
+        if record.flags & 0x80 != 0 {
+            if record.is_dir() || record.len == 0 {
+                return Err(IsoError::Other(
+                    "invalid ISO multi-extent record".to_owned(),
+                ));
+            }
+            pending = Some(GroupedRecord {
+                record,
+                extents: vec![extent],
+            });
+        } else {
+            out.push(GroupedRecord {
+                record,
+                extents: vec![extent],
+            });
+        }
+    }
+
+    if pending.is_some() {
+        return Err(IsoError::Other(
+            "unterminated ISO multi-extent sequence".to_owned(),
+        ));
+    }
+    Ok(out)
+}
+
+fn validate_relative_path(path: &str) -> Result<()> {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains(['\0', '\\'])
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(IsoError::Other(format!("unsafe path in image: {path:?}")));
+    }
+    Ok(())
+}
+
+fn validate_extent(extent: Extent, image_size: u64) -> Result<()> {
+    let end = extent
+        .offset
+        .checked_add(extent.len)
+        .ok_or_else(|| IsoError::Other("ISO extent range overflow".to_owned()))?;
+    if end > image_size {
+        return Err(IsoError::Truncated);
+    }
+    Ok(())
+}
+
+/// Recursively list a directory tree, parents before files.
 ///
 /// The walker is iterative and bounded by `max_entries`, so malformed images
-/// with directory loops cannot exhaust memory or the stack.
+/// with directory loops cannot exhaust memory or the stack. Extents are
+/// checked against `image_size`; multi-extent records are joined in order.
 pub fn walk_tree(
     file: &mut File,
     root: &DirRecord,
     joliet: bool,
     max_entries: usize,
+    image_size: u64,
 ) -> Result<Vec<WalkEntry>> {
+    if max_entries == 0 {
+        return Ok(Vec::new());
+    }
     let mut out = Vec::new();
     let mut visited = std::collections::HashSet::new();
     visited.insert(root.extent);
     let mut stack = vec![(root.clone(), String::new(), 0u32)];
 
     while let Some((dir, prefix, depth)) = stack.pop() {
-        if depth > 32 || out.len() >= max_entries {
+        if depth > 32 {
             continue;
         }
-        for record in read_dir(file, &dir, joliet, max_entries)? {
+        let grouped = group_multi_extent(read_dir(file, &dir, joliet, max_entries)?)?;
+        for GroupedRecord { record, extents } in grouped {
             let path = if prefix.is_empty() {
                 record.name.clone()
             } else {
                 format!("{prefix}/{}", record.name)
             };
+            validate_relative_path(&path)?;
+            for extent in &extents {
+                validate_extent(*extent, image_size)?;
+            }
+            let len = extents.iter().try_fold(0u64, |total, extent| {
+                total
+                    .checked_add(extent.len)
+                    .ok_or_else(|| IsoError::Other("ISO file size overflow".to_owned()))
+            })?;
             let symlink = record.symlink_target.clone();
             if record.is_dir() && symlink.is_none() {
+                if extents.len() != 1 {
+                    return Err(IsoError::Other(
+                        "directory uses multiple ISO extents".to_owned(),
+                    ));
+                }
                 if visited.insert(record.extent) {
                     out.push(WalkEntry {
                         path: path.clone(),
-                        extent: record.extent,
-                        len: record.len,
+                        extent: extents[0].offset,
+                        len,
+                        extents,
                         is_dir: true,
                         symlink_target: None,
                     });
@@ -461,30 +599,56 @@ pub fn walk_tree(
             } else {
                 out.push(WalkEntry {
                     path,
-                    extent: record.extent,
-                    len: record.len,
+                    extent: extents[0].offset,
+                    len,
+                    extents,
                     is_dir: record.is_dir() && symlink.is_none(),
                     symlink_target: symlink,
                 });
             }
-            if out.len() >= max_entries {
-                break;
+            if out.len() > max_entries {
+                return Err(IsoError::Other(format!(
+                    "image contains more than {max_entries} entries"
+                )));
             }
         }
     }
+    // Deterministic order with every directory before any file. Extraction
+    // needs parent directories to exist before the files inside them.
+    out.sort_by(|a, b| (!a.is_dir, a.path.as_str()).cmp(&(!b.is_dir, b.path.as_str())));
     Ok(out)
 }
 
-/// Read at most `max` bytes from a file extent.
+/// Read at most `max` bytes from a single file extent.
 pub fn read_file(file: &mut File, extent: u32, size: u32, max: usize) -> Result<Vec<u8>> {
     let len = (size as usize).min(max);
     if len == 0 {
         return Ok(Vec::new());
     }
     let mut data = vec![0u8; len];
-    file.seek(SeekFrom::Start(extent as u64 * SECTOR_SIZE))?;
+    file.seek(SeekFrom::Start(u64::from(extent) * SECTOR_SIZE))?;
     file.read_exact(&mut data)?;
     Ok(data)
+}
+
+/// Read at most `max` bytes from a catalog entry, concatenating every extent.
+pub fn read_walk_entry(file: &mut File, entry: &WalkEntry, max: usize) -> Result<Vec<u8>> {
+    let mut remaining = (max as u64).min(entry.len);
+    let mut out = Vec::with_capacity(remaining.min(usize::MAX as u64) as usize);
+    for extent in entry.source_extents() {
+        if remaining == 0 {
+            break;
+        }
+        let want = remaining.min(extent.len);
+        let start = out.len();
+        let want_usize = usize::try_from(want)
+            .map_err(|_| IsoError::Other("file prefix too large".to_owned()))?;
+        out.resize(start + want_usize, 0);
+        file.seek(SeekFrom::Start(extent.offset))?;
+        file.read_exact(&mut out[start..])?;
+        remaining -= want;
+    }
+    Ok(out)
 }
 
 pub fn le_u16(bytes: &[u8]) -> u16 {

@@ -1818,7 +1818,9 @@ dependencies = [
  "image2usb-extract",
  "image2usb-iso",
  "image2usb-platform",
+ "image2usb-testiso",
  "serde_json",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "winres",
@@ -1831,6 +1833,7 @@ dependencies = [
  "crossbeam-channel",
  "hex",
  "serde",
+ "serde_json",
  "sha2",
  "tempfile",
  "thiserror 2.0.21",
@@ -1842,8 +1845,10 @@ name = "image2usb-extract"
 version = "0.1.0"
 dependencies = [
  "fatfs",
+ "hex",
  "image2usb-core",
  "image2usb-iso",
+ "image2usb-platform",
  "image2usb-testiso",
  "sha2",
  "tempfile",
@@ -1882,11 +1887,13 @@ dependencies = [
 name = "image2usb-platform"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "image2usb-core",
  "libc",
  "plist",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",

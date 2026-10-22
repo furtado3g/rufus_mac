@@ -13,6 +13,9 @@
 
 use image2usb_core::{Error, Platform, Result};
 
+#[cfg(all(feature = "windows-media", target_os = "macos"))]
+pub mod media;
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]

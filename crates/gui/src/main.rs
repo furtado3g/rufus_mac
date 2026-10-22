@@ -13,10 +13,11 @@ use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 use image2usb_core::util::format_bytes;
 use image2usb_core::{
-    CancelToken, DeviceInfo, PartitionScheme, Phase, ProgressEvent, ProgressSink, ResolvedMode,
-    Result, VerifyMode, WriteOptions, check_target, verify_image, write_image,
+    CancelToken, DeviceInfo, FileSystem as FilesystemKind, FileSystemChoice, PartitionScheme,
+    Phase, ProgressEvent, ProgressSink, ResolvedMode, Result, VerifyMode, WriteOptions,
+    check_target, verify_image, write_image,
 };
-use image2usb_extract::extract_image;
+use image2usb_extract::{WINDOWS_NTFS_SUPPORTED, extract_image, resolve_filesystem};
 use image2usb_iso::{Distro, IsoInfo, analyze_path};
 use image2usb_platform::native;
 
@@ -80,6 +81,7 @@ struct App {
 
     mode: ModeChoice,
     scheme: PartitionScheme,
+    filesystem: FileSystemChoice,
     verify: bool,
     confirmed: bool,
 
@@ -106,6 +108,7 @@ impl App {
             analysis_error: None,
             mode: ModeChoice::Auto,
             scheme: PartitionScheme::Mbr,
+            filesystem: FileSystemChoice::Auto,
             verify: true,
             confirmed: false,
             busy: false,
@@ -174,21 +177,55 @@ impl App {
         })
     }
 
+    fn filesystem_plan(&self) -> Option<std::result::Result<(FilesystemKind, String), String>> {
+        let info = self.analysis.as_ref()?;
+        let mode = self.resolved_mode()?;
+        Some(resolve_filesystem(self.filesystem, mode, info).map_err(|error| error.to_string()))
+    }
+
     fn can_write(&self) -> bool {
         !self.busy
             && self.confirmed
             && self.analysis.is_some()
             && self.selected_device().is_some_and(|d| d.is_safe_target())
             && self.resolved_mode().is_some()
-            && !self.extract_windows()
+            && self.windows_incompatibility().is_none()
+            && match self.filesystem_plan() {
+                Some(Ok((FilesystemKind::Fat32, _))) => true,
+                Some(Ok((FilesystemKind::Ntfs, _))) => WINDOWS_NTFS_SUPPORTED,
+                _ => false,
+            }
     }
 
-    fn extract_windows(&self) -> bool {
-        self.resolved_mode() == Some(ResolvedMode::Extract)
-            && self
-                .analysis
-                .as_ref()
-                .is_some_and(|info| info.distro == Distro::Windows)
+    fn windows_incompatibility(&self) -> Option<String> {
+        if self.resolved_mode() != Some(ResolvedMode::Extract) {
+            return None;
+        }
+        let info = self.analysis.as_ref()?;
+        if info.distro != Distro::Windows {
+            return None;
+        }
+        let windows = info.windows.as_ref()?;
+        if !windows.bootmgr || !windows.bcd {
+            return Some(
+                "Windows boot chain is incomplete: BOOTMGR and boot/BCD are required.".to_owned(),
+            );
+        }
+        if windows.efi_fallback.is_none() {
+            return Some(
+                "Windows media has no EFI/BOOT/BOOT<arch>.EFI removable-media fallback.".to_owned(),
+            );
+        }
+        if windows.pe_architecture == image2usb_iso::WindowsArchitecture::Unknown {
+            return Some(
+                "Windows EFI fallback has no recognized PE machine; extraction is refused."
+                    .to_owned(),
+            );
+        }
+        if windows.install_parts.is_empty() {
+            return Some("Windows media has no installation image.".to_owned());
+        }
+        None
     }
 
     fn start_write(&mut self, ctx: egui::Context) {
@@ -204,6 +241,31 @@ impl App {
             return;
         };
         let mode = self.resolved_mode().unwrap_or(ResolvedMode::Dd);
+        if let Some(reason) = self.windows_incompatibility() {
+            self.log(format!("Windows compatibility check failed: {reason}"));
+            return;
+        }
+        let (filesystem, filesystem_reason) = match self.filesystem_plan() {
+            Some(Ok(plan)) => plan,
+            Some(Err(error)) => {
+                self.log(format!("Filesystem selection failed: {error}"));
+                return;
+            }
+            None => {
+                self.log("Analyze an image first.");
+                return;
+            }
+        };
+        if mode == ResolvedMode::Extract
+            && filesystem == FilesystemKind::Ntfs
+            && !WINDOWS_NTFS_SUPPORTED
+        {
+            self.log(
+                "NTFS/UEFI:NTFS extraction is not available in this build; use a build with the \
+                 windows-media feature on macOS. The operation stopped before opening the device.",
+            );
+            return;
+        }
         // Extraction needs room for FAT metadata and the full tree, so require
         // the image size plus a margin and never less than 64 MiB.
         let required = if mode == ResolvedMode::Extract {
@@ -231,7 +293,14 @@ impl App {
         self.confirmed = false;
         self.progress = Some(ProgressEvent::message(Phase::Opening, "opening device"));
         self.status = "Opening device...".to_owned();
-        self.log(format!("Writing {} to {}", iso.display(), device.id));
+        self.log(format!(
+            "Writing {} to {}: {} + {} ({})",
+            iso.display(),
+            device.id,
+            mode,
+            filesystem,
+            filesystem_reason
+        ));
 
         let tx = self.tx.clone();
         let verify = self.verify;
@@ -267,6 +336,7 @@ impl App {
                     ResolvedMode::Extract => {
                         let options = WriteOptions {
                             scheme,
+                            filesystem: filesystem.into(),
                             verify: if verify {
                                 VerifyMode::Sha256
                             } else {
@@ -408,6 +478,7 @@ impl App {
     }
 
     fn draw_image(&mut self, ui: &mut egui::Ui) {
+        let previous_options = (self.mode, self.scheme, self.filesystem, self.verify);
         ui.heading("Image");
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -519,10 +590,71 @@ impl App {
                         ui.selectable_value(&mut self.scheme, PartitionScheme::Gpt, "GPT + ESP");
                     });
             });
-            if self.extract_windows() {
+            ui.horizontal(|ui| {
+                ui.label("Filesystem");
+                egui::ComboBox::from_id_salt("filesystem")
+                    .selected_text(match self.filesystem {
+                        FileSystemChoice::Auto => "Auto",
+                        FileSystemChoice::Fat32 => "FAT32",
+                        FileSystemChoice::Ntfs => "NTFS",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.filesystem, FileSystemChoice::Auto, "Auto");
+                        ui.selectable_value(&mut self.filesystem, FileSystemChoice::Fat32, "FAT32");
+                        ui.selectable_value(&mut self.filesystem, FileSystemChoice::Ntfs, "NTFS");
+                    });
+            });
+            match self.filesystem_plan() {
+                Some(Ok((FilesystemKind::Fat32, reason))) => {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        format!("Filesystem: FAT32 — {reason}"),
+                    );
+                }
+                Some(Ok((FilesystemKind::Ntfs, reason))) => {
+                    if WINDOWS_NTFS_SUPPORTED {
+                        ui.colored_label(
+                            egui::Color32::YELLOW,
+                            format!(
+                                "Filesystem: NTFS — {reason}. A small FAT partition with the \
+                                 UEFI:NTFS chainloader will be added; Secure Boot acceptance is \
+                                 not validated in this build."
+                            ),
+                        );
+                    } else {
+                        ui.colored_label(
+                            egui::Color32::LIGHT_RED,
+                            format!(
+                                "Filesystem: NTFS — {reason}. NTFS/UEFI:NTFS extraction is not \
+                                 available in this build."
+                            ),
+                        );
+                    }
+                }
+                Some(Err(error)) => {
+                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                }
+                None => {}
+            }
+            if let Some(reason) = self.windows_incompatibility() {
+                ui.colored_label(egui::Color32::LIGHT_RED, reason);
+            } else if self
+                .analysis
+                .as_ref()
+                .is_some_and(|info| info.distro == Distro::Windows)
+            {
+                let ntfs_note = if WINDOWS_NTFS_SUPPORTED {
+                    " Large media can use NTFS plus the UEFI:NTFS chainloader."
+                } else {
+                    ""
+                };
                 ui.colored_label(
-                    egui::Color32::from_rgb(255, 120, 120),
-                    "Windows extraction is not implemented yet (needs wimlib/split-WIM). Use DD.",
+                    egui::Color32::YELLOW,
+                    format!(
+                        "Windows extraction validates BOOTMGR, boot/BCD and the EFI fallback, then \
+                         copies from a private snapshot. Windows media is UEFI-only in this path; \
+                         legacy BIOS boot is not installed.{ntfs_note}"
+                    ),
                 );
             } else {
                 ui.colored_label(
@@ -562,6 +694,9 @@ impl App {
                 ui.spinner();
             }
         });
+        if previous_options != (self.mode, self.scheme, self.filesystem, self.verify) {
+            self.confirmed = false;
+        }
     }
 }
 

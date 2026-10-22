@@ -8,11 +8,18 @@ authors.workspace = true
 repository.workspace = true
 description = "Partitioning, FAT32 and file extraction for image2usb"
 
+[features]
+# Native NTFS formatting and the UEFI:NTFS Windows commit path.
+windows-media = ["image2usb-platform/windows-media"]
+
 [dependencies]
 image2usb-core.workspace = true
+image2usb-platform.workspace = true
 image2usb-iso.workspace = true
 fatfs.workspace = true
+hex.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 tracing.workspace = true
 unicode-normalization.workspace = true
 

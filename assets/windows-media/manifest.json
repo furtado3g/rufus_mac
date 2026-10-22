@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "host_targets": [
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc"
+  ],
+  "resources": [
+    {
+      "id": "libudfread",
+      "role": "host_library_source",
+      "version": "1.2.0",
+      "url": "https://download.videolan.org/pub/videolan/libudfread/libudfread-1.2.0.tar.xz",
+      "size": 28732,
+      "sha256": "bb477cbd4cfbfc7787d9d05b71ee5e70430f5cfebf1297497f7e83547958050f",
+      "license": "LGPL-2.1-or-later; file-level audit required",
+      "corresponding_source": "same archive; include local patches and build inputs at distribution",
+      "recipe": "T004: scripts/build-windows-media.sh and scripts/build-windows-media.ps1; upstream meson.build",
+      "build_status": "not_built"
+    },
+    {
+      "id": "ntfs-3g",
+      "role": "host_library_and_formatter_source",
+      "version": "2026.9.28",
+      "commit": "7f0f841fc52cf719106c5c93bafe465004e36816",
+      "url": "https://codeload.github.com/tuxera/ntfs-3g/tar.gz/7f0f841fc52cf719106c5c93bafe465004e36816",
+      "size": 909072,
+      "sha256": "ef4c631d943667885347047aaedf48443c96bf4979c1cf2576d94ef65ed90f46",
+      "license": "GPL-2.0-or-later for selected integration; file-level audit required; COPYING.LIB also present",
+      "corresponding_source": "same archive; include formatter adaptation, patches and build inputs at distribution",
+      "recipe": "T004/T006: scripts/build-windows-media.sh and scripts/build-windows-media.ps1; adapt mkntfs to checked RawIo callbacks, no FUSE",
+      "build_status": "not_built"
+    },
+    {
+      "id": "wimlib-imagex",
+      "role": "private_host_helper_source",
+      "version": "1.14.5",
+      "commit": "cd5e231c348c255ae5088873b5a66ee0eb96fa07",
+      "url": "https://codeload.github.com/ebiggers/wimlib/tar.gz/cd5e231c348c255ae5088873b5a66ee0eb96fa07",
+      "size": 795604,
+      "sha256": "176157527d5f85fb0c61014b7ab3309018b9e75ac370808ff783e3acfe4c667f",
+      "license": "GPL-3.0-or-later for helper; audit enabled dependencies separately",
+      "corresponding_source": "same archive; include dependency sources, patches and build inputs at distribution",
+      "recipe": "T004: scripts/build-windows-media.sh and scripts/build-windows-media.ps1; upstream bootstrap/configure; disable FUSE and NTFS-3G integration",
+      "build_status": "not_built"
+    },
+    {
+      "id": "uefi-ntfs-image",
+      "role": "target_boot_asset",
+      "version": "Rufus asset at pinned commit; loader 2.8, signed NTFS driver 1.9, EfiFs 1.12 per upstream readme",
+      "commit": "2350489fe902bdc71d37f255a7684fe06a0ab2d0",
+      "url": "https://raw.githubusercontent.com/pbatard/rufus/2350489fe902bdc71d37f255a7684fe06a0ab2d0/res/uefi/uefi-ntfs.img",
+      "size": 1048576,
+      "sha256": "72683fa1250eeea772d3399277b434d4e55ba8dd0dc926e52d817e701fc2eb9e",
+      "target_architectures": ["x86_64", "aarch64"],
+      "license": "Mixed components; UEFI:NTFS GPL-2.0-or-later, NTFS driver and EfiFs require file-level audit before redistribution",
+      "corresponding_source": "T003/T024: pin and deliver exact loader/driver sources and build inputs; upstream readme is provenance, not sufficient source delivery",
+      "provenance_url": "https://raw.githubusercontent.com/pbatard/rufus/2350489fe902bdc71d37f255a7684fe06a0ab2d0/res/uefi/readme.txt",
+      "recipe": "T024: copy upstream image byte-for-byte; never rebuild or modify signed boot asset",
+      "validation_status": "asset committed and SHA-256 verified; PE signatures, DB/DBX audit, component sources and boot acceptance pending"
+    }
+  ]
+}
