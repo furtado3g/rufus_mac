@@ -7,7 +7,7 @@
 //! or detect every adversarial modification made during capture.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -16,9 +16,11 @@ use image2usb_core::{
     ProgressEvent, ProgressSink, RawIo, ResolvedMode, Result, VerifyMode, WriteOptions,
 };
 use image2usb_iso::{
-    IsoInfo, SECTOR_SIZE, WalkEntry, WindowsArchitecture, WindowsInfo, analyze_path,
-    read_volume_descriptors, walk_tree,
+    IsoInfo, SECTOR_SIZE, WalkEntry, WindowsArchitecture, WindowsInfo, read_volume_descriptors,
+    walk_tree,
 };
+#[cfg(all(feature = "windows-media", target_os = "macos"))]
+use image2usb_iso::{WindowsTreeEntry, detect_windows_from_tree};
 use sha2::{Digest, Sha256};
 
 use crate::extract::{
@@ -33,7 +35,7 @@ use crate::windows_layout::{
     UEFI_NTFS_IMAGE, WindowsScheme, plan_windows_layout, write_windows_layout,
 };
 #[cfg(all(feature = "windows-media", target_os = "macos"))]
-use image2usb_platform::media::{NtfsFormatOptions, NtfsVolume, format_ntfs};
+use image2usb_platform::media::{NtfsFormatOptions, NtfsVolume, Udf, format_ntfs};
 
 const MAX_ENTRIES: usize = 250_000;
 const COPY_CHUNK: usize = 1024 * 1024;
@@ -109,6 +111,15 @@ pub fn resolve_filesystem(
     }
 }
 
+/// Filesystem tree that supplied the Windows catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowsCatalogSource {
+    /// ISO 9660/Joliet tree.
+    Iso,
+    /// UDF tree (used by current Windows 11 media whose ISO 9660 root is a stub).
+    Udf,
+}
+
 /// Fully prepared Windows source. Dropping it removes the private snapshot.
 #[derive(Debug)]
 pub struct PreparedWindows {
@@ -117,6 +128,7 @@ pub struct PreparedWindows {
     pub info: IsoInfo,
     pub windows: WindowsInfo,
     pub catalog: Vec<WalkEntry>,
+    pub catalog_source: WindowsCatalogSource,
     pub source_sha256: [u8; 32],
     pub warnings: Vec<String>,
 }
@@ -181,7 +193,7 @@ pub fn prepare_windows(
     compare_metadata(&metadata_before, &metadata_after)?;
     compare_metadata(&path_metadata_before, &path_metadata_after)?;
 
-    let info = analyze_path(&snapshot_path)
+    let info = crate::extract::analyze_iso(&snapshot_path)
         .map_err(|err| Error::InvalidImage(format!("snapshot analysis failed: {err}")))?;
     if info.distro != image2usb_iso::Distro::Windows {
         return Err(Error::InvalidImage(
@@ -197,7 +209,7 @@ pub fn prepare_windows(
             "private snapshot length differs from the source".to_owned(),
         ));
     }
-    let catalog = read_catalog(&snapshot_path, snapshot_len)?;
+    let (catalog, catalog_source) = read_catalog(&snapshot_path, snapshot_len, &info)?;
     validate_catalog(&catalog, &windows)?;
     validate_windows_metadata(&windows)?;
     let mut warnings = info.warnings.clone();
@@ -216,6 +228,7 @@ pub fn prepare_windows(
         info,
         windows,
         catalog,
+        catalog_source,
         source_sha256,
         warnings,
     })
@@ -317,7 +330,11 @@ fn validate_swm(parts: &[image2usb_iso::WindowsPart]) -> Result<()> {
     Ok(())
 }
 
-fn read_catalog(path: &Path, image_size: u64) -> Result<Vec<WalkEntry>> {
+fn read_catalog(
+    path: &Path,
+    image_size: u64,
+    info: &IsoInfo,
+) -> Result<(Vec<WalkEntry>, WindowsCatalogSource)> {
     let mut file = File::open(path)?;
     let descriptors = read_volume_descriptors(&mut file, image_size).map_err(iso_error)?;
     let root = descriptors
@@ -325,14 +342,168 @@ fn read_catalog(path: &Path, image_size: u64) -> Result<Vec<WalkEntry>> {
         .as_ref()
         .or(descriptors.primary.as_ref().map(|volume| &volume.root))
         .ok_or_else(|| Error::InvalidImage("no ISO 9660 root directory".to_owned()))?;
-    walk_tree(
+    let iso_catalog = walk_tree(
         &mut file,
         root,
         descriptors.has_joliet,
         MAX_ENTRIES,
         image_size,
     )
-    .map_err(iso_error)
+    .map_err(iso_error)?;
+
+    if catalog_has_windows_payload(&iso_catalog) {
+        return Ok((iso_catalog, WindowsCatalogSource::Iso));
+    }
+
+    if info.has_udf {
+        #[cfg(all(feature = "windows-media", target_os = "macos"))]
+        {
+            let mut udf = Udf::open(File::open(path)?).map_err(udf_error)?;
+            let udf_catalog = walk_udf_catalog(&mut udf)?;
+            if !udf_catalog.is_empty() {
+                return Ok((udf_catalog, WindowsCatalogSource::Udf));
+            }
+        }
+        #[cfg(not(all(feature = "windows-media", target_os = "macos")))]
+        {
+            return Err(Error::Unsupported(
+                "Windows media stores its payload in UDF; this build has no UDF catalog support. \
+                 Use a macOS build with the windows-media feature"
+                    .to_owned(),
+            ));
+        }
+    }
+
+    // The ISO 9660 tree is the only catalog. Validation below will report the
+    // missing Windows boot/install files with the usual diagnostic.
+    Ok((iso_catalog, WindowsCatalogSource::Iso))
+}
+
+fn catalog_has_windows_payload(catalog: &[WalkEntry]) -> bool {
+    let has_bootmgr = catalog
+        .iter()
+        .any(|entry| !entry.is_dir && entry.path.eq_ignore_ascii_case("bootmgr"));
+    let has_install = catalog.iter().any(|entry| {
+        if entry.is_dir {
+            return false;
+        }
+        let path = entry.path.to_ascii_lowercase();
+        let Some(rest) = path.strip_prefix("sources/") else {
+            return false;
+        };
+        matches!(rest, "install.wim" | "install.esd" | "install.swm")
+            || (rest.starts_with("install")
+                && rest.ends_with(".swm")
+                && rest.len() > 11
+                && rest[7..rest.len() - 4]
+                    .chars()
+                    .all(|character| character.is_ascii_digit()))
+    });
+    has_bootmgr && has_install
+}
+
+#[cfg(all(feature = "windows-media", target_os = "macos"))]
+fn walk_udf_catalog(udf: &mut Udf) -> Result<Vec<WalkEntry>> {
+    const MAX_DEPTH: usize = 64;
+    let mut entries = Vec::new();
+    let mut pending = vec![(String::new(), 0usize)];
+    while let Some((directory, depth)) = pending.pop() {
+        if depth > MAX_DEPTH {
+            return Err(Error::InvalidImage(
+                "UDF directory tree exceeds the supported depth".to_owned(),
+            ));
+        }
+        let children = udf.read_dir(&directory).map_err(udf_error)?;
+        for child in children {
+            if child.name.is_empty()
+                || child.name == "."
+                || child.name == ".."
+                || child.name.contains(['/', '\\'])
+            {
+                return Err(Error::InvalidImage(format!(
+                    "invalid UDF entry name {:?} in {directory:?}",
+                    child.name
+                )));
+            }
+            let path = if directory.is_empty() {
+                child.name
+            } else {
+                format!("{directory}/{}", child.name)
+            };
+            if entries.len() >= MAX_ENTRIES {
+                return Err(Error::InvalidImage(format!(
+                    "UDF catalog exceeds the {MAX_ENTRIES} entry limit"
+                )));
+            }
+            let len = if child.is_dir {
+                0
+            } else {
+                udf.file_size(&path).map_err(udf_error)?
+            };
+            entries.push(WalkEntry {
+                path: path.clone(),
+                extent: 0,
+                len,
+                extents: Vec::new(),
+                is_dir: child.is_dir,
+                symlink_target: None,
+            });
+            if child.is_dir {
+                pending.push((path, depth + 1));
+            }
+        }
+    }
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(entries)
+}
+
+/// Enrich an ISO 9660 analysis with Windows metadata from the UDF tree.
+///
+/// This is deliberately separate from `image2usb-iso`: the UDF reader is a
+/// native, feature-gated dependency used only by the Windows media path.
+#[cfg(all(feature = "windows-media", target_os = "macos"))]
+pub(crate) fn enrich_windows_from_udf(path: &Path, info: &mut IsoInfo) -> Result<bool> {
+    let mut udf = Udf::open(File::open(path)?).map_err(udf_error)?;
+    let catalog = walk_udf_catalog(&mut udf)?;
+    let tree = catalog
+        .iter()
+        .map(|entry| WindowsTreeEntry {
+            path: entry.path.clone(),
+            size: entry.len,
+            is_dir: entry.is_dir,
+        })
+        .collect::<Vec<_>>();
+    let windows = detect_windows_from_tree(
+        &tree,
+        |entry_path, max| {
+            let mut file = udf.open_file(entry_path).ok()?;
+            let mut buffer = vec![0u8; max];
+            let read = file.read_at(0, &mut buffer).ok()?;
+            buffer.truncate(read);
+            Some(buffer)
+        },
+        &mut info.boot_files,
+        &mut info.warnings,
+    );
+    let Some(windows) = windows else {
+        return Ok(false);
+    };
+    if let Some(fallback) = &windows.efi_fallback {
+        info.boot_files.efi_boot.push(fallback.clone());
+        info.boot_files.efi_boot.sort();
+        info.boot_files.efi_boot.dedup();
+    }
+    info.distro = image2usb_iso::Distro::Windows;
+    info.windows = Some(windows);
+    info.warnings.push(
+        "Windows metadata was read from the UDF tree; the ISO 9660 root is a boot stub".to_owned(),
+    );
+    Ok(true)
+}
+
+#[cfg(all(feature = "windows-media", target_os = "macos"))]
+fn udf_error(error: std::io::Error) -> Error {
+    Error::InvalidImage(format!("UDF catalog: {error}"))
 }
 
 fn validate_catalog(catalog: &[WalkEntry], windows: &WindowsInfo) -> Result<()> {
@@ -517,6 +688,96 @@ fn secure_create(path: &Path) -> Result<File> {
     Ok(OpenOptions::new().write(true).create_new(true).open(path)?)
 }
 
+/// Snapshot reader selected by the catalog source. UDF entries carry paths
+/// rather than ISO 9660 extents, so the copy loops share one chunk callback.
+enum SnapshotSource {
+    Iso(File),
+    #[cfg(all(feature = "windows-media", target_os = "macos"))]
+    Udf(Udf),
+}
+
+impl SnapshotSource {
+    fn open(prepared: &PreparedWindows) -> Result<Self> {
+        let file = prepared.open_snapshot()?;
+        match prepared.catalog_source {
+            WindowsCatalogSource::Iso => Ok(Self::Iso(file)),
+            WindowsCatalogSource::Udf => {
+                #[cfg(all(feature = "windows-media", target_os = "macos"))]
+                {
+                    Ok(Self::Udf(Udf::open(file).map_err(udf_error)?))
+                }
+                #[cfg(not(all(feature = "windows-media", target_os = "macos")))]
+                {
+                    let _ = file;
+                    Err(Error::Unsupported(
+                        "this build cannot read a UDF Windows catalog".to_owned(),
+                    ))
+                }
+            }
+        }
+    }
+
+    fn copy_entry(
+        &mut self,
+        entry: &WalkEntry,
+        cancel: &CancelToken,
+        mut consume: impl FnMut(&[u8], u64) -> Result<()>,
+    ) -> Result<()> {
+        let mut buffer = vec![0u8; COPY_CHUNK];
+        match self {
+            Self::Iso(file) => {
+                let mut entry_offset = 0u64;
+                for extent in entry.source_extents() {
+                    file.seek(SeekFrom::Start(extent.offset))?;
+                    let mut remaining = extent.len;
+                    while remaining > 0 {
+                        cancel.check()?;
+                        let want = (remaining as usize).min(buffer.len());
+                        file.read_exact(&mut buffer[..want])?;
+                        consume(&buffer[..want], entry_offset)?;
+                        entry_offset += want as u64;
+                        remaining -= want as u64;
+                    }
+                }
+                if entry_offset != entry.len {
+                    return Err(Error::InvalidImage(format!(
+                        "extent lengths for {} do not add up to its declared size",
+                        entry.path
+                    )));
+                }
+            }
+            #[cfg(all(feature = "windows-media", target_os = "macos"))]
+            Self::Udf(udf) => {
+                let mut file = udf.open_file(&entry.path).map_err(udf_error)?;
+                let declared = file.size().map_err(udf_error)?;
+                if declared != entry.len {
+                    return Err(Error::InvalidImage(format!(
+                        "UDF file size changed for {}: catalog {} bytes, file {} bytes",
+                        entry.path, entry.len, declared
+                    )));
+                }
+                let mut entry_offset = 0u64;
+                while entry_offset < entry.len {
+                    cancel.check()?;
+                    let want = (entry.len - entry_offset).min(buffer.len() as u64) as usize;
+                    let read = file
+                        .read_at(entry_offset, &mut buffer[..want])
+                        .map_err(udf_error)?;
+                    if read == 0 {
+                        return Err(Error::InvalidImage(format!(
+                            "UDF file {} ended before its declared size",
+                            entry.path
+                        )));
+                    }
+                    consume(&buffer[..read], entry_offset)?;
+                    entry_offset += read as u64;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Commit a prepared Windows image to a FAT32 device.
 pub fn extract_windows_fat32(
     prepared: &PreparedWindows,
@@ -586,7 +847,7 @@ pub fn extract_windows_fat32(
         .filter(|entry| !entry.is_dir)
         .try_fold(0u64, |total, entry| total.checked_add(entry.len))
         .ok_or_else(|| Error::InvalidImage("Windows file sizes overflow".to_owned()))?;
-    let mut iso = prepared.open_snapshot()?;
+    let mut source = SnapshotSource::open(prepared)?;
     let (manifest, directories, copied) = {
         let fs = fatfs::FileSystem::new(&mut part, fatfs::FsOptions::new())
             .map_err(|err| fat_error("mount", err))?;
@@ -616,37 +877,19 @@ pub fn extract_windows_fat32(
                 .map_err(|err| fat_error(&dest, err))?;
             out.truncate().map_err(|err| fat_error(&dest, err))?;
             let mut hasher = (options.verify == VerifyMode::Sha256).then(Sha256::new);
-            let mut entry_copied = 0u64;
-            for extent in entry.source_extents() {
-                use std::io::{Seek, SeekFrom};
-                iso.seek(SeekFrom::Start(extent.offset))?;
-                let mut remaining = extent.len;
-                let mut buffer = vec![0u8; COPY_CHUNK.min(remaining.max(1) as usize)];
-                while remaining > 0 {
-                    cancel.check()?;
-                    let want = (remaining as usize).min(buffer.len());
-                    iso.read_exact(&mut buffer[..want])?;
-                    out.write_all(&buffer[..want])
-                        .map_err(|err| fat_error(&dest, err))?;
-                    if let Some(hasher) = hasher.as_mut() {
-                        hasher.update(&buffer[..want]);
-                    }
-                    remaining -= want as u64;
-                    copied += want as u64;
-                    entry_copied += want as u64;
-                    let now = Instant::now();
-                    if now.duration_since(last_report) >= REPORT_INTERVAL {
-                        sink.report(copy_progress(copied, total_bytes, &dest, started));
-                        last_report = now;
-                    }
+            source.copy_entry(entry, cancel, |chunk, _offset| {
+                out.write_all(chunk).map_err(|err| fat_error(&dest, err))?;
+                if let Some(hasher) = hasher.as_mut() {
+                    hasher.update(chunk);
                 }
-            }
-            if entry_copied != entry.len {
-                return Err(Error::InvalidImage(format!(
-                    "extent lengths for {} do not add up to its declared size",
-                    entry.path
-                )));
-            }
+                copied += chunk.len() as u64;
+                let now = Instant::now();
+                if now.duration_since(last_report) >= REPORT_INTERVAL {
+                    sink.report(copy_progress(copied, total_bytes, &dest, started));
+                    last_report = now;
+                }
+                Ok(())
+            })?;
             out.flush().map_err(|err| fat_error(&dest, err))?;
             manifest.push(ManifestEntry {
                 path: dest,
@@ -773,7 +1016,7 @@ fn extract_windows_ntfs_impl(
     part.flush().map_err(Error::Io)?;
     sink.report(ProgressEvent::message(Phase::Formatting, "NTFS formatted"));
 
-    let mut iso = prepared.open_snapshot()?;
+    let mut source = SnapshotSource::open(prepared)?;
     let mut manifest = Vec::new();
     let mut directories = 0u64;
     let mut copied = 0u64;
@@ -813,36 +1056,19 @@ fn extract_windows_ntfs_impl(
             let mut out = volume.create_file(&entry.path)?;
             out.truncate(0)?;
             let mut hasher = (options.verify == VerifyMode::Sha256).then(Sha256::new);
-            let mut entry_copied = 0u64;
-            for extent in entry.source_extents() {
-                use std::io::{Seek, SeekFrom};
-                iso.seek(SeekFrom::Start(extent.offset))?;
-                let mut remaining = extent.len;
-                let mut buffer = vec![0u8; COPY_CHUNK.min(remaining.max(1) as usize)];
-                while remaining > 0 {
-                    cancel.check()?;
-                    let want = (remaining as usize).min(buffer.len());
-                    iso.read_exact(&mut buffer[..want])?;
-                    out.write_at(entry_copied, &buffer[..want])?;
-                    if let Some(hasher) = hasher.as_mut() {
-                        hasher.update(&buffer[..want]);
-                    }
-                    remaining -= want as u64;
-                    copied += want as u64;
-                    entry_copied += want as u64;
-                    let now = Instant::now();
-                    if now.duration_since(last_report) >= REPORT_INTERVAL {
-                        sink.report(copy_progress(copied, total_bytes, &entry.path, started));
-                        last_report = now;
-                    }
+            source.copy_entry(entry, cancel, |chunk, offset| {
+                out.write_at(offset, chunk)?;
+                if let Some(hasher) = hasher.as_mut() {
+                    hasher.update(chunk);
                 }
-            }
-            if entry_copied != entry.len {
-                return Err(Error::InvalidImage(format!(
-                    "extent lengths for {} do not add up to its declared size",
-                    entry.path
-                )));
-            }
+                copied += chunk.len() as u64;
+                let now = Instant::now();
+                if now.duration_since(last_report) >= REPORT_INTERVAL {
+                    sink.report(copy_progress(copied, total_bytes, &entry.path, started));
+                    last_report = now;
+                }
+                Ok(())
+            })?;
             out.close()?;
             manifest.push(ManifestEntry {
                 path: entry.path.clone(),

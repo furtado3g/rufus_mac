@@ -15,7 +15,7 @@ use image2usb_core::{
     VerifyMode, WriteOptions, check_target, verify_image, write_image,
 };
 use image2usb_extract::{WINDOWS_NTFS_SUPPORTED, extract_image, prepare_windows};
-use image2usb_iso::{IsoInfo, analyze_path};
+use image2usb_iso::IsoInfo;
 use image2usb_platform::native;
 
 #[derive(Parser)]
@@ -760,7 +760,7 @@ fn open_output_existing(path: &Path, min_len: u64) -> Result<FileDevice> {
 }
 
 fn analyze_iso(path: &Path) -> Result<IsoInfo> {
-    analyze_path(path).map_err(|err| Error::InvalidImage(err.to_string()))
+    image2usb_extract::analyze_iso(path)
 }
 
 fn install_cancel_handler() -> Result<CancelToken> {
@@ -862,15 +862,17 @@ fn hint_for(err: &Error) -> Option<&'static str> {
         }
         Error::UnsafeTarget(_) => Some("only USB/SD removable media can be used as targets"),
         Error::DeviceNotFound(_) => Some("run `image2usb list` and copy the device id exactly"),
-        Error::InvalidImage(message) if message.contains("UDF-only") => {
-            Some("UDF-only images are not supported; use an ISO 9660/Joliet image or DD mode")
-        }
+        Error::InvalidImage(message) if message.contains("UDF-only") => Some(
+            "UDF-only Windows media needs a macOS windows-media build; Linux UDF-only images \
+             are not supported",
+        ),
         Error::InvalidImage(_) => Some("make sure the file is an ISO 9660 image"),
         Error::ExtractionTooLarge { .. } => {
             Some("use a larger USB drive or choose DD mode for this image")
         }
         Error::Unsupported(message) if message.contains("Windows") => Some(
-            "use a macOS build with windows-media for NTFS/UEFI:NTFS, or --mode dd for a Windows ISO",
+            "use a macOS build with windows-media for NTFS/UEFI:NTFS; non-hybrid Windows \
+             media may not boot in DD mode",
         ),
         _ => None,
     }

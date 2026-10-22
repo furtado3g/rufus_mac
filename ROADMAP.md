@@ -1,7 +1,7 @@
 # image2usb roadmap
 
-Status: **pre-alpha; M2 multi-distro extraction, M3 GPT/ESP and M4 legacy BIOS boot validated in QEMU; physical hardware pending**.
-Last updated: 2026-10-20.
+Status: **pre-alpha; M2 multi-distro extraction, M3 GPT/ESP, M4 legacy BIOS boot and M5 Windows media validated in QEMU; physical hardware pending**.
+Last updated: 2026-10-22.
 Main branch: `main` (see `git log`).
 
 This is the working plan for the next milestones. Each milestone lists the goal,
@@ -24,9 +24,9 @@ repository and CI is green.
 | UEFI firmware boot | QEMU/OVMF **verified** | Extraction and DD control reached the live desktop; M4 regression reached GRUB and Anaconda on MBR and GPT; evidence in `docs/validation/uefi-2026-10-20.md` and `docs/validation/bios-2026-10-20.md`; physical hardware pending |
 | Physical USB write | Pending | No real USB stick has been written; do not use the connected Expansion HDD |
 | Legacy BIOS boot | QEMU/SeaBIOS **verified** | Bundled GRUB 2.14 core; Fedora MBR and GPT both reached Anaconda. Non-GRUB images and 4Kn targets warn and keep UEFI; physical BIOS pending. Evidence in `docs/validation/bios-2026-10-20.md` |
-| Windows media | Not implemented | Rejected with an explicit `Unsupported` error |
+| Windows media | macOS opt-in, QEMU/OVMF setup UI | Real Windows 11 UDF ISO extracted to GPT + NTFS/UEFI:NTFS; UEFI:NTFS 2.8 launched Windows bootmgr and Windows Setup reached the language screen. Physical media and full installation pending; evidence in `docs/validation/windows-m5-build.md` (US3) |
 | GPT extraction | Done (single ESP) | `--scheme gpt`, protective MBR, primary/backup headers, CRC32, diskutil and OVMF validation |
-| NTFS / second data partition | Not implemented | Single FAT32 ESP only; large-tree split is deferred |
+| NTFS / second data partition | Done (opt-in macOS `windows-media`) | NTFS data partition plus fixed 1 MiB UEFI:NTFS ESP; 512-byte sectors only; real `install.wim` write/readback validated |
 | ARM64 targets | CI only | Windows ARM64 and Linux ARM64 paths not locally validated |
 | Rock Ridge symlinks | Done (skip) | Direct `SL` and SUSP `CE` targets detected; symlinks skipped with a warning because FAT32 has none |
 | Boot config labels | Done | Long ISO labels are rewritten to FAT32's 11-character label in `grub.cfg`/`isolinux.cfg`; Fedora's Anaconda boot validates this |
@@ -344,23 +344,29 @@ boot and print an explicit warning.
 **Tasks**
 
 - [ ] Integrate wimlib (LGPL) for WIM inspection and splitting; document
-      dynamic vs. bundled linking and source availability.
-- [ ] Implement the >4 GiB `install.wim` path: split into `install.swm` on
-      FAT32, or create an NTFS data partition plus UEFI:NTFS.
-- [ ] Copy the Windows boot chain (`bootmgr`, `EFI/Microsoft/Boot`, BCD) and
+      dynamic vs. bundled linking and source availability. The native library
+      is built, but splitting is not wired into extraction.
+- [x] Implement the >4 GiB `install.wim` path with an NTFS data partition plus
+      UEFI:NTFS. FAT32 split-WIM remains unimplemented.
+- [x] Copy the Windows boot chain (`bootmgr`, `EFI/Microsoft/Boot`, BCD) and
       ensure the removable fallback `EFI/BOOT/BOOTX64.EFI` exists.
-- [ ] Detect Windows media even when distro markers are missing
-      (`sources/install.wim|esd|swm`).
+- [x] Detect Windows media even when distro markers are missing
+      (`sources/install.wim|esd|swm`), including UDF-only Windows 11 media.
 - [ ] Add Windows 11 options as opt-in: TPM/Secure Boot bypass and offline
       account (registry edits); keep defaults non-destructive.
 - [ ] Test in QEMU OVMF and on physical UEFI hardware; include Windows 10/11
-      x64 and ARM64 where available.
-- [ ] Update the GUI warning and CLI hints; remove the current rejection.
+      x64 and ARM64 where available. QEMU/OVMF reached the Windows 11 Setup
+      language screen; physical UEFI, full installation, Windows 10 and ARM64
+      remain pending.
+- [x] Update the GUI warning and CLI hints for the opt-in macOS path.
 
 **Acceptance**
 
-- Windows 10 and 11 installers boot and reach the setup UI from a generated USB.
-- Large WIM handling is documented and verified.
+- Windows 10 and 11 installers boot and reach the setup UI from a generated
+  USB. Windows 11 reached the setup UI under QEMU/OVMF; physical media and
+  Windows 10 remain pending.
+- Large WIM handling is documented and verified. A real 7.8 GB `install.wim`
+  was written and read back; FAT32 split-WIM is still pending.
 - No registry/boot modification happens unless the user opts in.
 
 ### M6 — Portable artifacts, signing and CI

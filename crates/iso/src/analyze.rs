@@ -226,8 +226,11 @@ pub fn analyze_path(path: impl Into<PathBuf>) -> Result<IsoInfo> {
     }
 
     if descriptors.has_udf {
-        warnings
-            .push("image contains UDF data; file extraction prefers UDF over ISO 9660".to_owned());
+        warnings.push(
+            "image contains UDF data; extraction may need the UDF catalog when the ISO 9660 tree \
+             is only a boot stub"
+                .to_owned(),
+        );
     }
 
     Ok(IsoInfo {
@@ -285,32 +288,59 @@ fn has_dir(tree: &[TreeEntry], path: &str) -> bool {
     find(tree, path).is_some_and(|e| e.is_dir)
 }
 
-fn detect_windows(
-    file: &mut File,
-    tree: &[TreeEntry],
+/// Minimal tree entry used by Windows detection. Paths may use any case;
+/// matching is ASCII case-insensitive. `size` is the file length in bytes and
+/// is ignored for directories.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsTreeEntry {
+    pub path: String,
+    pub size: u64,
+    pub is_dir: bool,
+}
+
+/// Detect Windows installation metadata from a caller-supplied tree.
+///
+/// `read_prefix` receives the original entry path and a maximum byte count. It
+/// may read fewer bytes; returning `None` records the same non-fatal warning as
+/// an unreadable ISO 9660 entry. Callers are responsible for bounds and for
+/// opening only regular files.
+pub fn detect_windows_from_tree(
+    tree: &[WindowsTreeEntry],
+    mut read_prefix: impl FnMut(&str, usize) -> Option<Vec<u8>>,
     boot_files: &mut BootFiles,
     warnings: &mut Vec<String>,
-) -> Result<Option<WindowsInfo>> {
-    let install_files = tree
+) -> Option<WindowsInfo> {
+    let normalized = tree
         .iter()
-        .filter(|entry| !entry.is_dir && is_install_image_path(&entry.path))
+        .map(|entry| (entry.path.to_ascii_lowercase(), entry))
         .collect::<Vec<_>>();
-    let bootmgr = find(tree, "bootmgr");
+    let find = |path: &str| {
+        normalized
+            .iter()
+            .find(|(candidate, _)| candidate == path)
+            .map(|(_, entry)| *entry)
+    };
+    let install_files = normalized
+        .iter()
+        .filter(|(path, entry)| !entry.is_dir && is_install_image_path(path))
+        .map(|(_, entry)| *entry)
+        .collect::<Vec<_>>();
+    let bootmgr = find("bootmgr");
     if install_files.is_empty() && bootmgr.is_none() {
-        return Ok(None);
+        return None;
     }
 
     boot_files.bootmgr = bootmgr.is_some();
     let mut info = WindowsInfo {
         bootmgr: bootmgr.is_some(),
-        bcd: find(tree, "boot/bcd").is_some(),
+        bcd: find("boot/bcd").is_some(),
         ..WindowsInfo::default()
     };
 
     info.install_parts = install_files
         .iter()
         .map(|entry| WindowsPart {
-            name: entry.path.clone(),
+            name: entry.path.to_ascii_lowercase(),
             size: entry.size,
         })
         .collect();
@@ -324,8 +354,8 @@ fn detect_windows(
 
     // Prefer the PE header over the fallback filename. A renamed or mismatched
     // fallback must be visible to preparation, which refuses the image.
-    let x64 = find(tree, "efi/boot/bootx64.efi");
-    let arm64 = find(tree, "efi/boot/bootaa64.efi");
+    let x64 = find("efi/boot/bootx64.efi");
+    let arm64 = find("efi/boot/bootaa64.efi");
     let fallback = match (x64, arm64) {
         (Some(entry), None) => Some(("efi/boot/bootx64.efi", entry, WindowsArchitecture::X64)),
         (None, Some(entry)) => Some(("efi/boot/bootaa64.efi", entry, WindowsArchitecture::Arm64)),
@@ -343,7 +373,7 @@ fn detect_windows(
     if let Some((name, entry, architecture)) = fallback {
         filename_architecture = architecture;
         info.efi_fallback = Some(name.to_owned());
-        if let Some(prefix) = read_tree_prefix(file, entry, 4096) {
+        if let Some(prefix) = read_prefix(&entry.path, 4096) {
             info.pe_architecture = pe_architecture(&prefix);
         }
         if info.pe_architecture == WindowsArchitecture::Unknown {
@@ -359,13 +389,14 @@ fn detect_windows(
         }
     }
 
-    let idwbinfo =
-        find(tree, "sources/idwbinfo.txt").and_then(|entry| read_tree_text(file, entry, 64 * 1024));
+    let idwbinfo = find("sources/idwbinfo.txt")
+        .and_then(|entry| read_prefix(&entry.path, 64 * 1024))
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
     if let Some(text) = &idwbinfo {
         let values = key_values(text);
         info.idwbinfo_architecture = match values.get("buildarch").map(String::as_str) {
-            Some("9") => WindowsArchitecture::X64,
-            Some("12") => WindowsArchitecture::Arm64,
+            Some("9" | "amd64" | "x64") => WindowsArchitecture::X64,
+            Some("12" | "arm64") => WindowsArchitecture::Arm64,
             _ => WindowsArchitecture::Unknown,
         };
         info.build = values
@@ -435,7 +466,33 @@ fn detect_windows(
         );
     }
 
-    Ok(Some(info))
+    Some(info)
+}
+
+fn detect_windows(
+    file: &mut File,
+    tree: &[TreeEntry],
+    boot_files: &mut BootFiles,
+    warnings: &mut Vec<String>,
+) -> Result<Option<WindowsInfo>> {
+    let entries = tree
+        .iter()
+        .map(|entry| WindowsTreeEntry {
+            path: entry.path.clone(),
+            size: entry.size,
+            is_dir: entry.is_dir,
+        })
+        .collect::<Vec<_>>();
+    Ok(detect_windows_from_tree(
+        &entries,
+        |path, max| {
+            tree.iter()
+                .find(|entry| entry.path.eq_ignore_ascii_case(path))
+                .and_then(|entry| read_tree_prefix(file, entry, max))
+        },
+        boot_files,
+        warnings,
+    ))
 }
 
 fn is_install_image_path(path: &str) -> bool {
@@ -508,11 +565,6 @@ fn read_tree_prefix(file: &mut File, entry: &TreeEntry, max: usize) -> Option<Ve
         symlink_target: None,
     };
     crate::iso9660::read_walk_entry(file, &source, max).ok()
-}
-
-fn read_tree_text(file: &mut File, entry: &TreeEntry, max: usize) -> Option<String> {
-    let bytes = read_tree_prefix(file, entry, max)?;
-    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn key_values(text: &str) -> std::collections::HashMap<String, String> {
@@ -632,4 +684,70 @@ fn detect_distro(
     }
 
     Ok((Distro::Other("unknown".to_owned()), None))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pe_x64() -> Vec<u8> {
+        let mut bytes = vec![0u8; 0x48];
+        bytes[..2].copy_from_slice(b"MZ");
+        bytes[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+        bytes[0x40..0x44].copy_from_slice(b"PE\0\0");
+        bytes[0x44..0x46].copy_from_slice(&0x8664u16.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn windows_tree_detection_is_case_insensitive_and_accepts_amd64() {
+        let tree = vec![
+            WindowsTreeEntry {
+                path: "BOOTMGR".to_owned(),
+                size: 10,
+                is_dir: false,
+            },
+            WindowsTreeEntry {
+                path: "Boot/BCD".to_owned(),
+                size: 20,
+                is_dir: false,
+            },
+            WindowsTreeEntry {
+                path: "Sources/Install.WIM".to_owned(),
+                size: 123,
+                is_dir: false,
+            },
+            WindowsTreeEntry {
+                path: "EFI/Boot/BOOTX64.EFI".to_owned(),
+                size: 30,
+                is_dir: false,
+            },
+            WindowsTreeEntry {
+                path: "Sources/idwbinfo.txt".to_owned(),
+                size: 18,
+                is_dir: false,
+            },
+        ];
+        let mut boot_files = BootFiles::default();
+        let mut warnings = Vec::new();
+        let info = detect_windows_from_tree(
+            &tree,
+            |path, _| {
+                if path.eq_ignore_ascii_case("sources/idwbinfo.txt") {
+                    Some(b"BuildArch=amd64\n".to_vec())
+                } else {
+                    Some(pe_x64())
+                }
+            },
+            &mut boot_files,
+            &mut warnings,
+        )
+        .expect("Windows tree detected");
+
+        assert_eq!(info.install_wim_size, Some(123));
+        assert_eq!(info.architecture, WindowsArchitecture::X64);
+        assert_eq!(info.idwbinfo_architecture, WindowsArchitecture::X64);
+        assert_eq!(info.efi_fallback.as_deref(), Some("efi/boot/bootx64.efi"));
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
 }

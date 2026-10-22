@@ -11,7 +11,8 @@ mod hybrid;
 mod iso9660;
 
 pub use analyze::{
-    BootFiles, Distro, IsoInfo, WindowsArchitecture, WindowsInfo, WindowsPart, analyze_path,
+    BootFiles, Distro, IsoInfo, WindowsArchitecture, WindowsInfo, WindowsPart, WindowsTreeEntry,
+    analyze_path, detect_windows_from_tree,
 };
 pub use eltorito::{BootEntry, ElToritoInfo, MediaType, Platform};
 pub use hybrid::{GptInfo, MbrInfo, MbrPartition};

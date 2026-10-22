@@ -70,6 +70,19 @@ def run(args, cwd):
     subprocess.run(list(map(str, args)), cwd=cwd, check=True)
 
 udf = sources["libudfread"]
+# Windows 11 ISOs use a non-zero UDF partition number (often 2989). libudfread
+# 1.2.0 hardcodes partition 0 while reading the volume descriptor sequence,
+# even though the logical volume's partition map already carries the correct
+# reference. Accept the first physical partition; the later partition-map
+# validation still checks the reference against the descriptor.
+udfread_c = udf / "src/udfread.c"
+udfread_text = udfread_c.read_text()
+old_vds = "_read_vds(input, 0, &vds)"
+new_vds = "_read_vds(input, -1, &vds)"
+if old_vds in udfread_text:
+    udfread_c.write_text(udfread_text.replace(old_vds, new_vds, 1))
+elif new_vds not in udfread_text:
+    sys.exit("unrecognized libudfread VDS call; refusing to patch partition selection")
 udf_build = work / "udf-build"
 if not (udf_build / "build.ninja").exists():
     run(["meson", "setup", udf_build, udf, "--prefix=" + str(prefix),

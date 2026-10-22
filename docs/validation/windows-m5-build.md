@@ -454,8 +454,10 @@ and do not validate Windows extraction or boot.
 
 ### Explicitly incomplete / unsupported
 
-- UDF-only Windows media still fails analysis with a specific error; the shared
-  catalog has not consumed `libudfread`. Multi-extent ISO/Joliet is supported.
+- At the time of this increment, UDF-only Windows media failed analysis with a
+  specific error because the shared catalog had not consumed `libudfread`.
+  Multi-extent ISO/Joliet is supported. The real UDF-only source is covered by
+  US3 below.
 - NTFS formatting/writing primitives exist but Windows NTFS commit, split WIM,
   ESD-to-NTFS selection and UEFI:NTFS asset/layout are not implemented. NTFS is
   refused before preparation/writing.
@@ -475,8 +477,10 @@ and do not validate Windows extraction or boot.
 
 Date: 2026-10-22. Host: macOS 15.8, Intel x86_64. No physical device, real
 Windows ISO, OVMF/Windows setup, Secure Boot, Linux/Windows build or remote CI
-was used. The tests prove the native formatting/writing path and partition
-readback for synthetic Windows-shaped media; they are not boot evidence.
+was used in this synthetic increment. The tests prove the native
+formatting/writing path and partition readback for synthetic Windows-shaped
+media; they are not boot evidence. The later real-media increment is recorded
+in US3 below.
 
 ### Asset provenance
 
@@ -619,9 +623,11 @@ or physical media. The test app was a custom EFI binary, not Windows.
 
 ### Explicitly incomplete / unsupported
 
-- No real Windows 10/11 ISO or file larger than 4 GiB was committed. The
-  >4 GiB NTFS primitive evidence remains the separate platform test; a real
-  `install.wim` write/readback and independent `chkdsk` are still required.
+- No real Windows 10/11 ISO or file larger than 4 GiB was committed in this
+  synthetic increment. The >4 GiB NTFS primitive evidence remains the separate
+  platform test; a real `install.wim` write/readback and independent `chkdsk`
+  were still required here. US3 records the real `install.wim` write and
+  readback; `chkdsk` remains pending.
 - No Windows setup boot, Secure Boot on/off test, PE signature verification or
   DB/DBX review was performed. A synthetic OVMF test proved only that the
   chainloader starts a custom EFI application from the NTFS partition; it is not
@@ -633,4 +639,156 @@ or physical media. The test app was a custom EFI binary, not Windows.
   does not include it unless built natively with the prefix.
 - WIM split, automatic FAT32/NTFS selection after helper inspection, real
   Windows large-file boot and physical-media validation remain open
-  (T020/T022/T023/T028/T039).
+  (T020/T022/T023/T028/T039). US3 records real large-file extraction and a
+  QEMU/OVMF Windows Setup language screen; physical media and a completed
+  installation remain open.
+
+
+## US3 — real Windows 11 UDF media, NTFS commit and OVMF setup UI
+
+Date: 2026-10-22. Host: macOS 15.8, Intel x86_64. Source:
+
+```text
+path    /Users/lfurtado/Downloads/Windows11_Client_x64_pt-br_26300_9457.iso
+size    8731574272 bytes
+sha256  d9ac87c1e9e47e0eb34eed443e5691c31781074e67608a51aee50d7c7039f684
+volume  CCCOMA_X64FRE_PT-BR_DV9
+```
+
+The ISO 9660 tree was verified independently with `bsdtar -tf` and contained
+only `.` and `README.TXT`. The Windows payload is UDF-only:
+
+```text
+sources/install.wim  7826284843 bytes
+sources/boot.wim      622568965 bytes
+```
+
+No physical device was written. The NTFS commit target was a sparse 16 GiB
+file. QEMU used `snapshot=on`, so the target file was not modified by the boot
+test. The target was also attached read-only with `hdiutil` for independent
+host checks.
+
+### UDF partition selection and the libudfread patch
+
+The project's UDF wrapper initially failed to open the real ISO with
+`udfread ERROR: failed reading Volume Descriptor Sequence`. `UDFREAD_TRACE=1`
+showed valid descriptors and a partition descriptor with:
+
+```text
+partition 2989 at lba 304, 4263160 blocks
+```
+
+libudfread 1.2.0 hardcodes partition `0` in `_read_vds(input, 0, &vds)`, while
+the logical volume's partition map correctly references partition 2989. The
+build recipe now patches that call to `-1` (accept the first physical
+partition) before compiling, with an exact-match assertion and an idempotent
+retry path. The later partition-map validation still checks the descriptor
+reference, so this does not accept an unrelated partition.
+
+After rebuilding the private static library, the real analysis returned:
+
+```text
+distro:            windows
+architecture:      x64
+install_wim_size:  7826284843
+install_format:    wim
+efi_fallback:      efi/boot/bootx64.efi
+pe_architecture:   x64
+idwbinfo:          x64 (BuildArch=amd64)
+```
+
+The analysis warning now describes the UDF catalog neutrally; it no longer
+claims that extraction prefers UDF over ISO 9660.
+
+### Preparation, extraction and host readback
+
+Real `--dry-run` preparation passed with 1065 files, 102 directories and
+8.1 GiB. The actual commit command was:
+
+```sh
+cargo run -q -p image2usb-cli --features windows-media -- \
+  write "$ISO" --output "$TARGET" --scheme gpt --filesystem ntfs --verify --yes
+```
+
+It completed in 323.9 s with `Extracted 1065 files (102 directories, 8.1 GiB)`.
+The application's verification pass reopened every file through its NTFS
+library and compared SHA-256. `diskutil list` reported:
+
+```text
+GUID_partition_scheme
+Microsoft Basic Data  CCCOMA_X64FRE_PT-BR_DV9  17.2 GB
+EFI                   RUFUS_BOOT               1.0 MB
+```
+
+For an independent content check, macOS mounted the NTFS partition read-only
+(`diskutil mount readOnly`) and the original ISO was mounted read-only with
+`hdiutil`. Both `sources/install.wim` files had the same size and SHA-256:
+
+```text
+2ef001d8b143f2bbeb0c4eab114b20ded4ee2356f3960a2ee783921818aa5338
+```
+
+`bootmgr` and `efi/boot/bootx64.efi` were byte-identical between source and
+destination as well. This proves large-file NTFS write/readback and host
+content equality; it is not a Windows `chkdsk` or an NTFS consistency repair.
+
+### QEMU/OVMF boot of the real target
+
+QEMU 11.1.1, OVMF UEFI 2.70 (`edk2-stable202408-prebuilt`), Secure Boot
+disabled, and the 16 GiB GPT target attached as USB storage with
+`snapshot=on`. The serial log recorded:
+
+```text
+UEFI:NTFS v2.8 (x64)
+Secure Boot status: Disabled
+Found NTFS target partition:
+  .../HD(1,GPT,...,0x800,0x1FFE800)
+Starting NTFS driver service:
+  NTFS Driver 1.9 (ntfs-3g a2226ecd)
+Opening target NTFS partition:
+  Volume label is 'CCCOMA_X64FRE_PT-BR_DV9'
+Launching 'efi\boot\bootx64.efi'...
+Starting Microsoft Windows bootmgr...
+```
+
+The VM then displayed the Windows 11 Setup language screen in Portuguese
+(`Instalação do Windows 11` / `Selecionar as configurações de idioma`). The
+screenshot and serial log are kept as:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| [`windows11-setup-language.png`](windows-m5-real/windows11-setup-language.png) | `ddf86a17ab09fb1a6c0e2c60abd832c98fc061e5d7ceb37ae08bd4a0079828e2` |
+| [`ovmf-serial.log`](windows-m5-real/ovmf-serial.log) | `8c8eb6510484e074c3a919826f8903f41e503964cd3d53727b7564996951bfb0` |
+
+At about 420 s the VM was back at the UEFI:NTFS boot screen; no installation
+was completed. This is direct evidence that the real Windows 11 media reached
+Windows Setup through the pinned UEFI:NTFS chainloader and the NTFS partition.
+It is not evidence of a full Windows installation, Secure Boot acceptance,
+DB/DBX behavior, a physical USB device, or `chkdsk`.
+
+### Final checks
+
+| Check | Result |
+| --- | --- |
+| `cargo test --workspace --locked` | PASS: 5 CLI, 22 core, 28+17 extract, 9+12 iso; other crates 0 |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | PASS |
+| `cargo test -p image2usb-platform --features windows-media` | PASS: 9 unit + 10 integration |
+| `cargo test -p image2usb-extract --features windows-media` | PASS: 34 unit + 17 integration + 2 NTFS/UEFI:NTFS |
+| `cargo test -p image2usb-cli -p image2usb-gui --features ...` | PASS: 5 CLI + 0 GUI |
+| Feature-enabled Clippy for platform/extract/CLI/GUI | PASS |
+| `cargo fmt --all --check` and `git diff --check` | PASS |
+
+### Remaining limits
+
+- Physical USB media, Windows `chkdsk`, Secure Boot on/off, PE signature and
+  DB/DBX acceptance, 4Kn, Apple Silicon native libraries, Linux/Windows host
+  builds, remote CI and WIM split remain unvalidated.
+- The QEMU/OVMF run reached the Setup language screen but did not complete a
+  Windows installation. The VM returned to the boot screen after about seven
+  minutes; no error diagnosis is claimed.
+- UDF support and the NTFS/UEFI:NTFS path remain opt-in and macOS-only
+  (`windows-media`). Default/universal builds do not include the UDF catalog
+  reader or NTFS writer.
+- The patched libudfread is a local, reproducible build-script change, not an
+  upstream release. Redistribution and source-delivery obligations still need
+  the T003 review.

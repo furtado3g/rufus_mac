@@ -958,24 +958,9 @@ impl Udf {
         Ok(Self { volume, input })
     }
 
-    /// Read a bounded range without loading the complete file into memory.
-    pub fn read_at(&mut self, path: &str, offset: u64, buffer: &mut [u8]) -> io::Result<usize> {
-        if path.is_empty()
-            || path.starts_with('/')
-            || path.contains(['\\', '\0'])
-            || path
-                .split('/')
-                .any(|part| part.is_empty() || part == "." || part == "..")
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid UDF relative path",
-            ));
-        }
-        let offset = i64::try_from(offset)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "UDF offset exceeds i64"))?;
-        let path = CString::new(path)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in UDF path"))?;
+    /// Open a regular UDF file for bounded, reused reads.
+    pub fn open_file(&mut self, path: &str) -> io::Result<UdfFile<'_>> {
+        let path = valid_path(path, false)?;
         self.input.error = None;
         // SAFETY: valid volume and NUL-terminated path, no retained path pointer.
         let handle = unsafe { udfread_file_open(self.volume.as_ptr(), path.as_ptr()) };
@@ -985,8 +970,56 @@ impl Udf {
                 .take()
                 .unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "UDF file not found"))
         })?;
+        Ok(UdfFile {
+            handle: Some(handle),
+            udf: self,
+        })
+    }
+
+    /// Return a regular file's declared size.
+    pub fn file_size(&mut self, path: &str) -> io::Result<u64> {
+        self.open_file(path)?.size()
+    }
+
+    /// Read a bounded range without loading the complete file into memory.
+    pub fn read_at(&mut self, path: &str, offset: u64, buffer: &mut [u8]) -> io::Result<usize> {
+        self.open_file(path)?.read_at(offset, buffer)
+    }
+}
+
+/// A live UDF regular file. The borrow keeps the owning volume alive, and the
+/// handle is closed exactly once before the volume can be dropped.
+pub struct UdfFile<'a> {
+    handle: Option<NonNull<c_void>>,
+    udf: &'a mut Udf,
+}
+
+impl UdfFile<'_> {
+    pub fn size(&self) -> io::Result<u64> {
+        let handle = self
+            .handle
+            .ok_or_else(|| io::Error::other("UDF file already closed"))?;
+        // SAFETY: handle is live.
+        let size = unsafe { udfread_file_size(handle.as_ptr()) };
+        if size < 0 {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid UDF file size",
+            ))
+        } else {
+            Ok(size as u64)
+        }
+    }
+
+    pub fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> io::Result<usize> {
+        let handle = self
+            .handle
+            .ok_or_else(|| io::Error::other("UDF file already closed"))?;
+        let offset = i64::try_from(offset)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "UDF offset exceeds i64"))?;
+        self.udf.input.error = None;
         // SAFETY: handle is live; buffer has the supplied writable length. The
-        // closure contains no panicking operations; handle is closed below.
+        // native call is synchronous and the handle stays open until close.
         let result = unsafe {
             let size = udfread_file_size(handle.as_ptr());
             if size < 0 || offset > size || udfread_file_seek(handle.as_ptr(), offset, 0) != offset
@@ -1001,12 +1034,27 @@ impl Udf {
                 usize::try_from(count).map_err(|_| io::Error::other("UDF read failed"))
             }
         };
-        // SAFETY: live handle, closed exactly once before volume can be dropped.
-        unsafe { udfread_file_close(handle.as_ptr()) };
-        match self.input.error.take() {
+        match self.udf.input.error.take() {
             Some(error) => Err(error),
             None => result,
         }
+    }
+
+    pub fn close(mut self) {
+        self.close_inner();
+    }
+
+    fn close_inner(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            // SAFETY: handle was returned by open and is not used elsewhere.
+            unsafe { udfread_file_close(handle.as_ptr()) };
+        }
+    }
+}
+
+impl Drop for UdfFile<'_> {
+    fn drop(&mut self) {
+        self.close_inner();
     }
 }
 

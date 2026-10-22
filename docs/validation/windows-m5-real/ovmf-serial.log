@@ -1,0 +1,72 @@
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI QEMU QEMU USB HARDDRIVE 1-0000:00:02.0-1" from PciRoot(0x0)/Pci(0x2,0x0)/USB(0x0,0x0)
+BdsDxe: starting Boot0001 "UEFI QEMU QEMU USB HARDDRIVE 1-0000:00:02.0-1" from PciRoot(0x0)/Pci(0x2,0x0)/USB(0x0,0x0)
+[2J[01;01H[0m[30m[47m
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            UEFI:NTFS v2.8 (x64)                             │
+│                            <https://un.akeo.ie>                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+[0m[37m[40m[1m[37m[40m[INFO][0m[37m[40m UEFI v2.70 (EDK II, 0x00010000)
+[1m[37m[40m[INFO][0m[37m[40m QEMU Standard PC (Q35 + ICH9, 2009)
+[1m[37m[40m[INFO][0m[37m[40m EDK II edk2-stable202408-prebuilt.qemu.org
+[1m[37m[40m[INFO][0m[37m[40m Secure Boot status: Disabled
+[1m[37m[40m[INFO][0m[37m[40m Disconnecting potentially blocking drivers
+[1m[37m[40m[INFO][0m[37m[40m Searching for target partition on boot disk:
+[1m[37m[40m[INFO][0m[37m[40m   PciRoot(0x0)/Pci(0x2,0x0)/USB(0x0,0x0)
+[1m[37m[40m[INFO][0m[37m[40m Found NTFS target partition:
+[1m[37m[40m[INFO][0m[37m[40m   PciRoot(0x0)/Pci(0x2,0x0)/USB(0x0,0x0)/HD(1,GPT,742A54E0-BA0C-9940-ABB6-E8F839481C12,0x800,0x1FFE800)
+[1m[37m[40m[INFO][0m[37m[40m Starting NTFS driver service:
+[1m[37m[40m[INFO][0m[37m[40m   NTFS Driver 1.9 (ntfs-3g a2226ecd)
+[1m[37m[40m[INFO][0m[37m[40m Opening target NTFS partition:
+[1m[37m[40m[INFO][0m[37m[40m   Volume label is 'CCCOMA_X64FRE_PT-BR_DV9'
+[1m[37m[40m[INFO][0m[37m[40m This system uses 64-bit x86 UEFI => searching for x64 UEFI bootloader
+[1m[37m[40m[INFO][0m[37m[40m Launching 'efi\boot\bootx64.efi'...
+[1m[37m[40m[INFO][0m[37m[40m Starting Microsoft Windows bootmgr...
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI QEMU QEMU USB HARDDRIVE 1-0000:00:02.0-1" from PciRoot(0x0)/Pci(0x2,0x0)/USB(0x0,0x0)
+BdsDxe: starting Boot0001 "UEFI QEMU QEMU USB HARDDRIVE 1-0000:00:02.0-1" from PciRoot(0x0)/Pci(0x2,0x0)/USB(0x0,0x0)
+[2J[01;01H[0m[30m[47m
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            UEFI:NTFS v2.8 (x64)                             │
+│                            <https://un.akeo.ie>                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+[0m[37m[40m[1m[37m[40m[INFO][0m[37m[40m UEFI v2.70 (EDK II, 0x00010000)
+[1m[37m[40m[INFO][0m[37m[40m QEMU Standard PC (Q35 + ICH9, 2009)
+[1m[37m[40m[INFO][0m[37m[40m EDK II edk2-stable202408-prebuilt.qemu.org
+[1m[37m[40m[INFO][0m[37m[40m Secure Boot status: Disabled
+[1m[37m[40m[INFO][0m[37m[40m Disconnecting potentially blocking drivers
+[1m[37m[40m[INFO][0m[37m[40m Searching for target partition on boot disk:
+[1m[37m[40m[INFO][0m[37m[40m   PciRoot(0x0)/Pci(0x2,0x0)/USB(0x0,0x0)
+[1m[37m[40m[INFO][0m[37m[40m Found NTFS target partition:
+[1m[37m[40m[INFO][0m[37m[40m   PciRoot(0x0)/Pci(0x2,0x0)/USB(0x0,0x0)/HD(1,GPT,742A54E0-BA0C-9940-ABB6-E8F839481C12,0x800,0x1FFE800)
+[1m[37m[40m[INFO][0m[37m[40m Starting NTFS driver service:
+[1m[37m[40m[INFO][0m[37m[40m   NTFS Driver 1.9 (ntfs-3g a2226ecd)
+[1m[37m[40m[INFO][0m[37m[40m Opening target NTFS partition:
+[1m[37m[40m[INFO][0m[37m[40m   Volume label is 'CCCOMA_X64FRE_PT-BR_DV9'
+[1m[37m[40m[INFO][0m[37m[40m This system uses 64-bit x86 UEFI => searching for x64 UEFI bootloader
+[1m[37m[40m[INFO][0m[37m[40m Launching 'efi\boot\bootx64.efi'...
+[1m[37m[40m[INFO][0m[37m[40m Starting Microsoft Windows bootmgr...
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: loading Boot0001 "UEFI QEMU QEMU USB HARDDRIVE 1-0000:00:02.0-1" from PciRoot(0x0)/Pci(0x2,0x0)/USB(0x0,0x0)
+BdsDxe: starting Boot0001 "UEFI QEMU QEMU USB HARDDRIVE 1-0000:00:02.0-1" from PciRoot(0x0)/Pci(0x2,0x0)/USB(0x0,0x0)
+[2J[01;01H[0m[30m[47m
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            UEFI:NTFS v2.8 (x64)                             │
+│                            <https://un.akeo.ie>                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+[0m[37m[40m[1m[37m[40m[INFO][0m[37m[40m UEFI v2.70 (EDK II, 0x00010000)
+[1m[37m[40m[INFO][0m[37m[40m QEMU Standard PC (Q35 + ICH9, 2009)
+[1m[37m[40m[INFO][0m[37m[40m EDK II edk2-stable202408-prebuilt.qemu.org
+[1m[37m[40m[INFO][0m[37m[40m Secure Boot status: Disabled
+[1m[37m[40m[INFO][0m[37m[40m Disconnecting potentially blocking drivers
+[1m[37m[40m[INFO][0m[37m[40m Searching for target partition on boot disk:
+[1m[37m[40m[INFO][0m[37m[40m   PciRoot(0x0)/Pci(0x2,0x0)/USB(0x0,0x0)
+[1m[37m[40m[INFO][0m[37m[40m Found NTFS target partition:
+[1m[37m[40m[INFO][0m[37m[40m   PciRoot(0x0)/Pci(0x2,0x0)/USB(0x0,0x0)/HD(1,GPT,742A54E0-BA0C-9940-ABB6-E8F839481C12,0x800,0x1FFE800)
+[1m[37m[40m[INFO][0m[37m[40m Starting NTFS driver service:
+[1m[37m[40m[INFO][0m[37m[40m   NTFS Driver 1.9 (ntfs-3g a2226ecd)
+[1m[37m[40m[INFO][0m[37m[40m Opening target NTFS partition:
+[1m[37m[40m[INFO][0m[37m[40m   Volume label is 'CCCOMA_X64FRE_PT-BR_DV9'
+[1m[37m[40m[INFO][0m[37m[40m This system uses 64-bit x86 UEFI => searching for x64 UEFI bootloader
+[1m[37m[40m[INFO][0m[37m[40m Launching 'efi\boot\bootx64.efi'...
+[1m[37m[40m[INFO][0m[37m[40m Starting Microsoft Windows bootmgr...

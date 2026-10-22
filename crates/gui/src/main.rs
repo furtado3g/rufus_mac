@@ -17,8 +17,8 @@ use image2usb_core::{
     Phase, ProgressEvent, ProgressSink, ResolvedMode, Result, VerifyMode, WriteOptions,
     check_target, verify_image, write_image,
 };
-use image2usb_extract::{WINDOWS_NTFS_SUPPORTED, extract_image, resolve_filesystem};
-use image2usb_iso::{Distro, IsoInfo, analyze_path};
+use image2usb_extract::{WINDOWS_NTFS_SUPPORTED, analyze_iso, extract_image, resolve_filesystem};
+use image2usb_iso::{Distro, IsoInfo};
 use image2usb_platform::native;
 
 fn main() -> eframe::Result {
@@ -151,7 +151,7 @@ impl App {
         self.status = "Analyzing image...".to_owned();
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let result = analyze_path(&path).map_err(|err| err.to_string());
+            let result = analyze_iso(&path).map_err(|err| err.to_string());
             let _ = tx.send(Msg::Analysis(Box::new(result)));
             ctx.request_repaint();
         });

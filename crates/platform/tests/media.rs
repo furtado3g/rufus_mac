@@ -35,6 +35,17 @@ fn udf_catalog_and_reads_match_native_image() {
             .iter()
             .any(|entry| entry.name == "install.wim" && !entry.is_dir)
     );
+    assert_eq!(udf.file_size("sources/install.wim").unwrap(), 13);
+    {
+        let mut file = udf.open_file("sources/install.wim").unwrap();
+        assert_eq!(file.size().unwrap(), 13);
+        let mut bytes = [0; 32];
+        assert_eq!(file.read_at(0, &mut bytes).unwrap(), 13);
+        assert_eq!(&bytes[..13], b"fixture bytes");
+        assert_eq!(file.read_at(13, &mut bytes).unwrap(), 0);
+        assert!(file.read_at(14, &mut bytes).is_err());
+        file.close();
+    }
     let mut bytes = [0; 32];
     let count = udf.read_at("sources/install.wim", 0, &mut bytes).unwrap();
     assert_eq!(&bytes[..count], b"fixture bytes");
@@ -43,6 +54,7 @@ fn udf_catalog_and_reads_match_native_image() {
         0
     );
     assert!(udf.read_at("../install.wim", 0, &mut bytes).is_err());
+    assert!(udf.file_size("../install.wim").is_err());
     assert!(udf.read_dir("/sources").is_err());
 }
 

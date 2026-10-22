@@ -45,6 +45,22 @@ pub(crate) struct ManifestEntry {
     pub sha256: Option<[u8; 32]>,
 }
 
+/// Analyze an image, enriching Windows metadata from the UDF tree when the
+/// ISO 9660 root is only a boot stub. This is the analyzer used by the CLI and
+/// GUI; `image2usb-iso` itself remains free of native UDF dependencies.
+pub fn analyze_iso(path: &Path) -> Result<IsoInfo> {
+    let info = image2usb_iso::analyze_path(path).map_err(iso_error)?;
+    #[cfg(all(feature = "windows-media", target_os = "macos"))]
+    let info = {
+        let mut info = info;
+        if info.has_udf && info.windows.is_none() {
+            crate::windows::enrich_windows_from_udf(path, &mut info)?;
+        }
+        info
+    };
+    Ok(info)
+}
+
 pub fn extract_image(
     iso_path: &Path,
     info: &IsoInfo,

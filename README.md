@@ -6,12 +6,13 @@ image2usb is a portable, cross-platform alternative to Rufus written in Rust. It
 ships as a self-contained executable / app bundle: no installer, no runtime, no
 external tools required.
 
-> Status: **pre-alpha** (M4 — legacy BIOS boot). Device enumeration, ISO
+> Status: **pre-alpha** (M5 — large Windows media). Device enumeration, ISO
 > analysis, DD-mode writing, UEFI extraction and legacy BIOS extraction for
 > GRUB-based Linux images are implemented. MBR and GPT/ESP images boot under
 > QEMU/SeaBIOS and QEMU/OVMF. Windows FAT32 and opt-in macOS NTFS/UEFI:NTFS
-> extraction paths exist synthetically; Windows setup boot and
-> physical-hardware validation are still in progress.
+> extraction paths are implemented; a real Windows 11 UDF ISO reached the
+> Windows Setup language screen under QEMU/OVMF. Physical-hardware validation,
+> full installation and Secure Boot checks are still in progress.
 
 See [ROADMAP.md](ROADMAP.md) for the detailed plan, development setup on another
 machine, and per-milestone acceptance criteria.
@@ -24,7 +25,7 @@ machine, and per-milestone acceptance criteria.
 - [x] Extraction mode: MBR or GPT + FAT32 + files copied from the ISO tree (UEFI and GRUB-based BIOS boot, Linux distros)
 - [x] GPT with a single EFI System Partition (ESP)
 - [x] Legacy BIOS boot through a bundled GRUB 2.14 i386-pc core
-- [ ] NTFS data partition + UEFI:NTFS ESP for large Windows media (opt-in macOS `windows-media` build; boot validation pending)
+- [ ] NTFS data partition + UEFI:NTFS ESP for large Windows media (opt-in macOS `windows-media` build; real ISO wrote and reached Windows Setup under QEMU/OVMF, physical boot pending)
 - [ ] syslinux-based extraction and Windows BOOTMGR
 - [ ] Windows WIM split (wimlib)
 - [ ] Windows 11 unattended options (TPM / Secure Boot / offline account bypass)
@@ -107,16 +108,20 @@ Current limits (M4):
   System Partition for Linux/BSD and small Windows media. A macOS build with
   the `windows-media` feature can instead write an NTFS data partition plus a
   1 MiB FAT partition containing the pinned UEFI:NTFS chainloader. This path is
-  currently 512-byte-sector only and has synthetic readback, not Windows setup
-  boot or Secure Boot validation.
+  currently 512-byte-sector only. A real Windows 11 ISO was extracted and
+  reached Windows Setup under QEMU/OVMF with Secure Boot disabled; physical
+  media, a completed installation and Secure Boot validation remain pending.
 - **Windows media is UEFI-only.** Small media fits FAT32; larger media requires
   the opt-in NTFS/UEFI:NTFS path. WIM splitting and legacy BIOS BOOTMGR boot are
   not implemented. UEFI:NTFS asset signatures, DB/DBX and redistribution
   obligations are still under review; see `assets/uefi-ntfs/README.md`.
 - **Linux/BSD or Windows.** NTFS extraction is refused for non-Windows media.
-- **UDF-only images are rejected.** Hybrid ISO/UDF images are extracted from
-  their ISO 9660/Joliet tree with a warning; UDF-only media needs DD mode or a
-  future UDF reader.
+- **UDF-only Windows media needs the opt-in macOS feature.** Hybrid ISO/UDF
+  images whose payload is present in the ISO 9660/Joliet tree are extracted
+  from that tree with a warning. Current Windows 11 media stores the payload
+  only in UDF; the macOS `windows-media` build reads that catalog. Default and
+  universal builds do not include the UDF reader or NTFS writer, and Linux
+  UDF-only extraction remains unsupported.
 - **FAT32 labels are limited to 11 characters.** When the ISO volume ID is
   longer, extraction rewrites `LABEL=` and GRUB `search` references in boot
   configuration files to the actual FAT label (for example Fedora's
