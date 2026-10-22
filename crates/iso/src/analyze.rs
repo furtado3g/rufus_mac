@@ -76,6 +76,30 @@ pub struct WindowsPart {
     pub size: u64,
 }
 
+/// Windows 11 setup customization capabilities validated for an exact build.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct WindowsCapabilities {
+    pub bypass_tpm: bool,
+    pub bypass_secure_boot: bool,
+    pub offline_account: bool,
+}
+
+impl WindowsCapabilities {
+    /// Capabilities validated for a specific Windows build string.
+    pub fn for_build(build: Option<&str>) -> Self {
+        match build {
+            // Validated in M5 T031 via WinPE LabConfig:
+            Some("26300" | "26100") => Self {
+                bypass_tpm: true,
+                bypass_secure_boot: true,
+                offline_account: false, // OOBE unproven on this hardware/test
+            },
+            _ => Self::default(),
+        }
+    }
+}
+
 /// Windows installation-media metadata.
 ///
 /// These fields are additive for JSON consumers. A detected candidate is not a
@@ -102,6 +126,9 @@ pub struct WindowsInfo {
     pub build: Option<String>,
     #[serde(default)]
     pub edition: Option<String>,
+    /// Windows 11 customization capabilities validated for this exact build.
+    #[serde(default)]
+    pub capabilities: WindowsCapabilities,
     #[serde(default)]
     pub bootmgr: bool,
     #[serde(default)]
@@ -415,6 +442,32 @@ pub fn detect_windows_from_tree(
             .cloned();
     }
 
+    // When idwbinfo.txt did not supply a build number, inspect sources/install.wim XML.
+    if info.build.is_none()
+        && let Some(part) = info
+            .install_parts
+            .iter()
+            .find(|part| part.name == "sources/install.wim" || part.name == "sources/boot.wim")
+        && let Some(xml_meta) =
+            find(&part.name).and_then(|entry| read_wim_xml_metadata(&entry.path, &mut read_prefix))
+    {
+        if let Some(build) = xml_meta.build {
+            info.build = Some(build);
+        }
+        if info.edition.is_none()
+            && let Some(edition) = xml_meta.edition
+        {
+            info.edition = Some(edition);
+        }
+        if info.version.is_none()
+            && let Some(version) = xml_meta.version
+        {
+            info.version = Some(version);
+        }
+    }
+
+    info.capabilities = WindowsCapabilities::for_build(info.build.as_deref());
+
     info.architecture = match info.pe_architecture {
         WindowsArchitecture::Unknown => {
             if filename_architecture != WindowsArchitecture::Unknown {
@@ -574,6 +627,81 @@ fn key_values(text: &str) -> std::collections::HashMap<String, String> {
             Some((key.trim().to_ascii_lowercase(), value.trim().to_owned()))
         })
         .collect()
+}
+
+#[derive(Debug, Default)]
+struct WimXmlMetadata {
+    build: Option<String>,
+    edition: Option<String>,
+    version: Option<String>,
+}
+
+fn read_wim_xml_metadata(
+    path: &str,
+    read_prefix: &mut impl FnMut(&str, usize) -> Option<Vec<u8>>,
+) -> Option<WimXmlMetadata> {
+    // Read the 208-byte WIM header
+    let header_bytes = read_prefix(path, 208)?;
+    if header_bytes.len() < 208 || &header_bytes[0..8] != b"MSWIM\0\0\0" {
+        return None;
+    }
+    // XML resource header is at offset 0x48 (72)
+    let xml_res = &header_bytes[72..96];
+    let mut size_bytes = [0u8; 8];
+    size_bytes[0..7].copy_from_slice(&xml_res[0..7]);
+    let size = u64::from_le_bytes(size_bytes) as usize;
+    let flags = xml_res[7];
+    let offset = u64::from_le_bytes(xml_res[8..16].try_into().ok()?);
+
+    // If uncompressed/metadata (flags & 0x02 != 0) and fits in reasonable read
+    if (flags & 0x02) == 0 || size == 0 || size > 16 * 1024 * 1024 {
+        return None;
+    }
+
+    // Try reading up to offset + size from the file if supported by read_prefix
+    let total_to_read = usize::try_from(offset.checked_add(size as u64)?).ok()?;
+    let file_bytes = read_prefix(path, total_to_read)?;
+    if file_bytes.len() < total_to_read {
+        return None;
+    }
+    let xml_bytes = &file_bytes[usize::try_from(offset).ok()?..total_to_read];
+
+    let text = if xml_bytes.starts_with(&[0xff, 0xfe]) {
+        #[allow(clippy::chunks_exact_to_as_chunks)]
+        let u16s: Vec<u16> = xml_bytes[2..]
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect();
+        String::from_utf16_lossy(&u16s)
+    } else if xml_bytes.starts_with(b"<?xml") || xml_bytes.starts_with(b"<WIM>") {
+        String::from_utf8_lossy(xml_bytes).into_owned()
+    } else {
+        #[allow(clippy::chunks_exact_to_as_chunks)]
+        let u16s: Vec<u16> = xml_bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect();
+        String::from_utf16_lossy(&u16s)
+    };
+
+    let extract_tag = |tag: &str| -> Option<String> {
+        let open = format!("<{tag}>");
+        let close = format!("</{tag}>");
+        let start = text.find(&open)? + open.len();
+        let end = text[start..].find(&close)? + start;
+        let val = text[start..end].trim();
+        if val.is_empty() {
+            None
+        } else {
+            Some(val.to_owned())
+        }
+    };
+
+    Some(WimXmlMetadata {
+        build: extract_tag("BUILD"),
+        edition: extract_tag("EDITIONID"),
+        version: extract_tag("PRODUCTNAME"),
+    })
 }
 
 fn pe_architecture(bytes: &[u8]) -> WindowsArchitecture {

@@ -8,7 +8,7 @@ use image2usb_extract::{
     extract_image, extract_windows_fat32, list_extracted, plan_gpt_layout, plan_layout,
     prepare_windows, preview, read_extracted,
 };
-use image2usb_iso::analyze_path;
+use image2usb_iso::{WalkEntry, analyze_path};
 use image2usb_testiso::{
     DISK_INFO, EFI_BOOT, GRUB_CFG, ISOLINUX_CFG, WindowsFixture, build_image,
     build_image_with_grub, build_image_with_large_file, build_image_with_symlink,
@@ -744,7 +744,13 @@ fn source_changes_after_snapshot_do_not_affect_the_committed_tree() {
     let dir = tempfile::tempdir().unwrap();
     let iso = dir.path().join("windows.iso");
     build_windows_image(&iso, WindowsFixture::X64Wim);
-    let prepared = prepare_windows(&iso, &CancelToken::new(), &NoopSink).unwrap();
+    let prepared = prepare_windows(
+        &iso,
+        &WriteOptions::default(),
+        &CancelToken::new(),
+        &NoopSink,
+    )
+    .unwrap();
 
     std::fs::write(&iso, b"source replaced after the snapshot").unwrap();
 
@@ -856,9 +862,134 @@ fn rejects_windows_media_before_touching_the_device() {
         &NoopSink,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("FAT32"));
+    assert!(err.to_string().contains("FAT32"), "{err}");
 
     let mut mbr = [0u8; 512];
     device.read_exact_at(0, &mut mbr).unwrap();
     assert_eq!(mbr, [0u8; 512]);
+}
+
+#[test]
+fn windows_customizations_regressions_and_answer_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let iso = dir.path().join("windows.iso");
+    build_windows_image(&iso, WindowsFixture::X64Wim);
+    let mut info = analyze_path(&iso).unwrap();
+
+    // 1. Unknown / unvalidated build rejection before writing
+    let unvalidated_options = WriteOptions {
+        windows: image2usb_core::WindowsOptions {
+            bypass_tpm: true,
+            bypass_secure_boot: false,
+            offline_account: false,
+        },
+        ..WriteOptions::default()
+    };
+    let err =
+        prepare_windows(&iso, &unvalidated_options, &CancelToken::new(), &NoopSink).unwrap_err();
+    assert!(err.to_string().contains("not validated"), "{err}");
+
+    // 2. Validate capabilities for validated build 26100 / 26300
+    info.windows.as_mut().unwrap().build = Some("26300".to_owned());
+    info.windows.as_mut().unwrap().capabilities =
+        image2usb_iso::WindowsCapabilities::for_build(Some("26300"));
+
+    // Default flags are all false
+    let defaults = image2usb_core::WindowsOptions::default();
+    assert!(!defaults.bypass_tpm);
+    assert!(!defaults.bypass_secure_boot);
+    assert!(!defaults.offline_account);
+
+    // Offline account rejected on unproven build 26300
+    let offline_opts = image2usb_core::WindowsOptions {
+        offline_account: true,
+        ..defaults
+    };
+    let catalog = vec![];
+    let err = image2usb_extract::generate_autounattend_xml(
+        info.windows.as_ref().unwrap(),
+        &offline_opts,
+        &catalog,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("offline account flow is not validated"),
+        "{err}"
+    );
+
+    // Conflicting answer file in source image rejected
+    let conflict_catalog = vec![WalkEntry {
+        path: "autounattend.xml".to_owned(),
+        extent: 0,
+        len: 10,
+        extents: vec![],
+        is_dir: false,
+        symlink_target: None,
+    }];
+    let tpm_opts = image2usb_core::WindowsOptions {
+        bypass_tpm: true,
+        ..defaults
+    };
+    let err = image2usb_extract::generate_autounattend_xml(
+        info.windows.as_ref().unwrap(),
+        &tpm_opts,
+        &conflict_catalog,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("already contains an answer file"),
+        "{err}"
+    );
+
+    // Valid XML generation with TPM and Secure Boot bypass
+    let both_opts = image2usb_core::WindowsOptions {
+        bypass_tpm: true,
+        bypass_secure_boot: true,
+        offline_account: false,
+    };
+    let xml_bytes = image2usb_extract::generate_autounattend_xml(
+        info.windows.as_ref().unwrap(),
+        &both_opts,
+        &catalog,
+    )
+    .unwrap();
+    let xml_text = String::from_utf8(xml_bytes).unwrap();
+    assert!(xml_text.starts_with("<?xml version=\"1.0\" encoding=\"utf-8\"?>"));
+    assert!(xml_text.contains("BypassTPMCheck"));
+    assert!(xml_text.contains("BypassSecureBootCheck"));
+    // Ensures no automatic admin account without password or automated disk selection is introduced
+    assert!(!xml_text.contains("<AdministratorPassword>"));
+    assert!(!xml_text.contains("<InstallTo>"));
+    assert!(!xml_text.contains("<DiskID>"));
+
+    // Isolated TPM only
+    let tpm_xml = String::from_utf8(
+        image2usb_extract::generate_autounattend_xml(
+            info.windows.as_ref().unwrap(),
+            &tpm_opts,
+            &catalog,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(tpm_xml.contains("BypassTPMCheck"));
+    assert!(!tpm_xml.contains("BypassSecureBootCheck"));
+
+    // Isolated Secure Boot only
+    let sb_opts = image2usb_core::WindowsOptions {
+        bypass_secure_boot: true,
+        ..defaults
+    };
+    let sb_xml = String::from_utf8(
+        image2usb_extract::generate_autounattend_xml(
+            info.windows.as_ref().unwrap(),
+            &sb_opts,
+            &catalog,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(!sb_xml.contains("BypassTPMCheck"));
+    assert!(sb_xml.contains("BypassSecureBootCheck"));
 }

@@ -83,6 +83,10 @@ struct App {
     scheme: PartitionScheme,
     filesystem: FileSystemChoice,
     verify: bool,
+    bypass_tpm: bool,
+    bypass_secure_boot: bool,
+    offline_account: bool,
+    show_secure_boot_help: bool,
     confirmed: bool,
 
     busy: bool,
@@ -110,6 +114,10 @@ impl App {
             scheme: PartitionScheme::Mbr,
             filesystem: FileSystemChoice::Auto,
             verify: true,
+            bypass_tpm: false,
+            bypass_secure_boot: false,
+            offline_account: false,
+            show_secure_boot_help: false,
             confirmed: false,
             busy: false,
             progress: None,
@@ -225,6 +233,24 @@ impl App {
         if windows.install_parts.is_empty() {
             return Some("Windows media has no installation image.".to_owned());
         }
+        if self.bypass_tpm && !windows.capabilities.bypass_tpm {
+            return Some(format!(
+                "TPM bypass is not validated for Windows build {}.",
+                windows.build.as_deref().unwrap_or("unknown")
+            ));
+        }
+        if self.bypass_secure_boot && !windows.capabilities.bypass_secure_boot {
+            return Some(format!(
+                "Secure Boot setup bypass is not validated for Windows build {}.",
+                windows.build.as_deref().unwrap_or("unknown")
+            ));
+        }
+        if self.offline_account && !windows.capabilities.offline_account {
+            return Some(format!(
+                "Offline account flow is not validated for Windows build {}.",
+                windows.build.as_deref().unwrap_or("unknown")
+            ));
+        }
         None
     }
 
@@ -305,6 +331,11 @@ impl App {
         let tx = self.tx.clone();
         let verify = self.verify;
         let scheme = self.scheme;
+        let windows_options = image2usb_core::WindowsOptions {
+            bypass_tpm: self.bypass_tpm,
+            bypass_secure_boot: self.bypass_secure_boot,
+            offline_account: self.offline_account,
+        };
         let ctx_worker = ctx.clone();
         thread::spawn(move || {
             let platform = native();
@@ -343,6 +374,7 @@ impl App {
                                 VerifyMode::None
                             },
                             label: String::new(),
+                            windows: windows_options,
                             ..WriteOptions::default()
                         };
                         let stats =
@@ -478,7 +510,15 @@ impl App {
     }
 
     fn draw_image(&mut self, ui: &mut egui::Ui) {
-        let previous_options = (self.mode, self.scheme, self.filesystem, self.verify);
+        let previous_options = (
+            self.mode,
+            self.scheme,
+            self.filesystem,
+            self.verify,
+            self.bypass_tpm,
+            self.bypass_secure_boot,
+            self.offline_account,
+        );
         ui.heading("Image");
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -656,6 +696,33 @@ impl App {
                          legacy BIOS boot is not installed.{ntfs_note}"
                     ),
                 );
+
+                ui.add_space(6.0);
+                ui.heading("Windows 11 Customizations");
+                ui.checkbox(&mut self.bypass_tpm, "Bypass TPM 2.0 requirement");
+                ui.horizontal(|ui| {
+                    ui.checkbox(
+                        &mut self.bypass_secure_boot,
+                        "Bypass Secure Boot requirement",
+                    );
+                    if ui.button("Secure Boot Guidance…").clicked() {
+                        self.show_secure_boot_help = !self.show_secure_boot_help;
+                    }
+                });
+                if self.show_secure_boot_help {
+                    ui.group(|ui| {
+                        ui.label(egui::RichText::new("Secure Boot Guidance:").strong());
+                        ui.small("• Bypassing setup requirement skips the installer check only.");
+                        ui.small("• It does NOT disable Secure Boot in computer firmware (UEFI/BIOS).");
+                        ui.small("• If computer firmware refuses the USB, configure UEFI firmware manually.");
+                        ui.small("• Modifying firmware settings disables platform boot protection.");
+                        ui.small("• CRITICAL: Save your BitLocker recovery key before modifying firmware settings!");
+                    });
+                }
+                ui.checkbox(
+                    &mut self.offline_account,
+                    "Request offline / local account setup",
+                );
             } else {
                 ui.colored_label(
                     egui::Color32::YELLOW,
@@ -694,7 +761,17 @@ impl App {
                 ui.spinner();
             }
         });
-        if previous_options != (self.mode, self.scheme, self.filesystem, self.verify) {
+        if previous_options
+            != (
+                self.mode,
+                self.scheme,
+                self.filesystem,
+                self.verify,
+                self.bypass_tpm,
+                self.bypass_secure_boot,
+                self.offline_account,
+            )
+        {
             self.confirmed = false;
         }
     }

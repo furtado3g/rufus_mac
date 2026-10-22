@@ -75,7 +75,7 @@ pub fn extract_image(
         )
     })?;
     if info.distro == image2usb_iso::Distro::Windows {
-        let prepared = crate::windows::prepare_windows(iso_path, cancel, sink)?;
+        let prepared = crate::windows::prepare_windows(iso_path, options, cancel, sink)?;
         return match filesystem {
             FilesystemKind::Fat32 => {
                 crate::windows::extract_windows_fat32(&prepared, device, options, cancel, sink)

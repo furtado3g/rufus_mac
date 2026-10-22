@@ -5,3 +5,15 @@
 *.AppImage
 /dist
 /tmp
+.opencode
+.specify
+.env*
+!.env.example
+*.log
+*.tmp
+*.swp
+*.rlib
+*.prof*
+.idea/
+.vscode/
+Thumbs.db

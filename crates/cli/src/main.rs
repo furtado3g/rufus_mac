@@ -56,38 +56,51 @@ enum Command {
     },
     /// Write an ISO image to a device.
     Write {
-        /// Path to the ISO image.
-        iso: PathBuf,
+        /// Path to the ISO image. Required unless --secure-boot-help is passed.
+        #[arg(required_unless_present = "secure_boot_help")]
+        iso: Option<PathBuf>,
         /// Target device (see `image2usb list`).
-        #[arg(long, conflicts_with = "output")]
+        #[arg(long, conflicts_with_all = ["output", "secure_boot_help"])]
         device: Option<String>,
         /// Write to a regular file instead of a device (testing / image creation).
         /// Extraction requires this file to exist and be at least the ISO size
         /// plus 16 MiB (and at least 64 MiB).
-        #[arg(long, conflicts_with = "device")]
+        #[arg(long, conflicts_with_all = ["device", "secure_boot_help"])]
         output: Option<PathBuf>,
         /// Skip the interactive confirmation.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "secure_boot_help")]
         yes: bool,
         /// Print the plan without touching anything.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "secure_boot_help")]
         dry_run: bool,
         /// Write strategy.
-        #[arg(long, value_enum, default_value_t = ModeArg::Auto)]
+        #[arg(long, value_enum, default_value_t = ModeArg::Auto, conflicts_with = "secure_boot_help")]
         mode: ModeArg,
         /// Partition table for extraction (default: mbr).
-        #[arg(long, value_enum, default_value_t = SchemeArg::Mbr)]
+        #[arg(long, value_enum, default_value_t = SchemeArg::Mbr, conflicts_with = "secure_boot_help")]
         scheme: SchemeArg,
         /// Filesystem for extraction mode (default: auto).
-        #[arg(long, value_enum, default_value_t = FilesystemArg::Auto)]
+        #[arg(long, value_enum, default_value_t = FilesystemArg::Auto, conflicts_with = "secure_boot_help")]
         filesystem: FilesystemArg,
         /// Volume label for extraction mode (default: ISO volume ID).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "secure_boot_help")]
         label: Option<String>,
         /// Read the device back and compare it with the image. In extraction
         /// mode every copied file is read back and hashed.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "secure_boot_help")]
         verify: bool,
+        /// Bypass Windows 11 TPM 2.0 setup check (default: false).
+        #[arg(long, default_value_t = false, conflicts_with = "secure_boot_help")]
+        bypass_tpm: bool,
+        /// Bypass Windows 11 Secure Boot setup check (default: false).
+        #[arg(long, default_value_t = false, conflicts_with = "secure_boot_help")]
+        bypass_secure_boot: bool,
+        /// Request offline account creation in Windows setup (default: false).
+        #[arg(long, default_value_t = false, conflicts_with = "secure_boot_help")]
+        offline_account: bool,
+        /// Display Secure Boot guidance and exit without reading or writing media.
+        #[arg(long, exclusive = true)]
+        secure_boot_help: bool,
     },
 }
 
@@ -161,9 +174,26 @@ fn run(command: Command) -> Result<()> {
             filesystem,
             label,
             verify,
-        } => write(
-            &iso, device, output, yes, dry_run, mode, scheme, filesystem, label, verify,
-        ),
+            bypass_tpm,
+            bypass_secure_boot,
+            offline_account,
+            secure_boot_help,
+        } => {
+            if secure_boot_help {
+                print_secure_boot_help();
+                return Ok(());
+            }
+            let iso = iso.ok_or_else(|| Error::Other("missing ISO argument".to_owned()))?;
+            let windows = image2usb_core::WindowsOptions {
+                bypass_tpm,
+                bypass_secure_boot,
+                offline_account,
+            };
+            write(
+                &iso, device, output, yes, dry_run, mode, scheme, filesystem, label, verify,
+                windows,
+            )
+        }
     }
 }
 
@@ -336,10 +366,28 @@ fn write(
     filesystem: FilesystemArg,
     label: Option<String>,
     verify: bool,
+    windows: image2usb_core::WindowsOptions,
 ) -> Result<()> {
+    let has_windows_customizations =
+        windows.bypass_tpm || windows.bypass_secure_boot || windows.offline_account;
+    if has_windows_customizations && mode as usize == ModeArg::Dd as usize {
+        return Err(Error::Unsupported(
+            "Windows customizations (--bypass-tpm, --bypass-secure-boot, --offline-account) are only supported in extraction mode, not DD mode".to_owned(),
+        ));
+    }
+
     let info = analyze_iso(iso)?;
     let image_len = info.size;
     let resolved = resolve_mode(mode, &info);
+
+    if has_windows_customizations
+        && (resolved == ResolvedMode::Dd || info.distro != image2usb_iso::Distro::Windows)
+    {
+        return Err(Error::Unsupported(
+            "Windows customizations (--bypass-tpm, --bypass-secure-boot, --offline-account) can only be applied to Windows installation media in extraction mode".to_owned(),
+        ));
+    }
+
     let requested_filesystem = FileSystemChoice::from(filesystem);
     let (resolved_filesystem, filesystem_reason) =
         image2usb_extract::resolve_filesystem(requested_filesystem, resolved, &info)?;
@@ -353,6 +401,7 @@ fn write(
         filesystem: resolved_filesystem.into(),
         label: label.unwrap_or_default(),
         verify: verify_mode,
+        windows,
         ..WriteOptions::default()
     };
 
@@ -383,8 +432,19 @@ fn write(
             requested_filesystem, options.filesystem, filesystem_reason
         );
     }
-    for warning in &info.warnings {
-        println!("warning: {warning}");
+    if has_windows_customizations {
+        println!("Customizations requested:");
+        if options.windows.bypass_tpm {
+            println!("  - Bypass TPM 2.0 setup check (via WinPE autounattend.xml)");
+        }
+        if options.windows.bypass_secure_boot {
+            println!("  - Bypass Secure Boot setup check (via WinPE autounattend.xml)");
+        }
+        if options.windows.offline_account {
+            println!("  - Request offline/local account flow in setup");
+        }
+        println!("Notice: running Windows 11 on hardware that does not meet official system");
+        println!("requirements may result in compatibility issues or lack of official support.");
     }
 
     if resolved == ResolvedMode::Extract
@@ -416,7 +476,7 @@ fn write(
             if info.distro == image2usb_iso::Distro::Windows {
                 let cancel = CancelToken::new();
                 let sink = CliSink::new();
-                let prepared = prepare_windows(iso, &cancel, &sink)?;
+                let prepared = prepare_windows(iso, &options, &cancel, &sink)?;
                 let files = prepared
                     .catalog
                     .iter()
@@ -724,6 +784,40 @@ fn ensure_output_is_not_source(iso: &Path, output: &Path) -> Result<()> {
     Ok(())
 }
 
+fn print_secure_boot_help() {
+    println!("Secure Boot Guidance and Options");
+    println!("================================");
+    println!();
+    println!("1. Setup Bypass vs. Firmware Setting:");
+    println!("   - Passing `--bypass-secure-boot` configures Windows Setup via autounattend.xml");
+    println!("     to skip its hardware requirement check during installation.");
+    println!("   - It DOES NOT disable Secure Boot in computer firmware (UEFI BIOS).");
+    println!("   - It DOES NOT make computer firmware accept unauthenticated bootloaders.");
+    println!();
+    println!("2. Firmware Adjustments:");
+    println!("   - If your PC refuses to boot the USB media due to Secure Boot policy, you must");
+    println!(
+        "     manually enter UEFI firmware settings (e.g. Del, F2, F12) and configure Secure Boot."
+    );
+    println!(
+        "   - Warning: modifying firmware Secure Boot settings disables platform boot protection."
+    );
+    println!(
+        "   - CRITICAL: Ensure you have your BitLocker recovery key saved before modifying firmware"
+    );
+    println!(
+        "     settings, as changes to Secure Boot state will trigger BitLocker recovery prompts."
+    );
+    println!();
+    println!("3. Safe Operation:");
+    println!(
+        "   - image2usb never executes firmware commands or modifies host motherboard settings."
+    );
+    println!(
+        "   - Consult your motherboard or PC manufacturer instructions for model-specific UEFI keys."
+    );
+}
+
 fn open_output(path: &Path, len: u64) -> Result<FileDevice> {
     if !path.exists() {
         let file = File::create(path)?;
@@ -987,6 +1081,7 @@ mod tests {
             FilesystemArg::Auto,
             None,
             true,
+            image2usb_core::WindowsOptions::default(),
         )
         .unwrap();
         assert!(!output.exists());
@@ -1010,5 +1105,115 @@ mod tests {
             std::fs::hard_link(&iso, &hard).unwrap();
             assert!(ensure_output_is_not_source(&iso, &hard).is_err());
         }
+    }
+
+    #[test]
+    fn cli_contract_regressions_for_windows_options_and_secure_boot_help() {
+        use clap::Parser;
+
+        // 1. Secure boot help succeeds without ISO or destination arguments
+        let help_cli = Cli::try_parse_from(["image2usb", "write", "--secure-boot-help"]).unwrap();
+        match help_cli.command {
+            Command::Write {
+                secure_boot_help,
+                iso,
+                device,
+                output,
+                ..
+            } => {
+                assert!(secure_boot_help);
+                assert!(iso.is_none());
+                assert!(device.is_none());
+                assert!(output.is_none());
+            }
+            _ => panic!("expected Write command"),
+        }
+
+        // 2. Secure boot help conflicts with writing flags
+        assert!(
+            Cli::try_parse_from(["image2usb", "write", "--secure-boot-help", "--yes"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["image2usb", "write", "--secure-boot-help", "--bypass-tpm"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "image2usb",
+                "write",
+                "--secure-boot-help",
+                "--device",
+                "/dev/disk2"
+            ])
+            .is_err()
+        );
+
+        // 3. Independent flags default to false
+        let parsed = Cli::try_parse_from(["image2usb", "write", "win.iso"]).unwrap();
+        match parsed.command {
+            Command::Write {
+                bypass_tpm,
+                bypass_secure_boot,
+                offline_account,
+                secure_boot_help,
+                ..
+            } => {
+                assert!(!bypass_tpm);
+                assert!(!bypass_secure_boot);
+                assert!(!offline_account);
+                assert!(!secure_boot_help);
+            }
+            _ => panic!("expected Write"),
+        }
+
+        // 4. Windows customizations rejected on DD or non-Windows image
+        let dir = tempfile::tempdir().unwrap();
+        let linux = dir.path().join("linux.iso");
+        build_image(&linux, 0xEF, false);
+        let err = write(
+            &linux,
+            None,
+            None,
+            false,
+            true,
+            ModeArg::Auto,
+            SchemeArg::Mbr,
+            FilesystemArg::Auto,
+            None,
+            false,
+            image2usb_core::WindowsOptions {
+                bypass_tpm: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("can only be applied to Windows"),
+            "{err}"
+        );
+
+        let err_dd = write(
+            &linux,
+            None,
+            None,
+            false,
+            true,
+            ModeArg::Dd,
+            SchemeArg::Mbr,
+            FilesystemArg::Auto,
+            None,
+            false,
+            image2usb_core::WindowsOptions {
+                bypass_secure_boot: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err_dd
+                .to_string()
+                .contains("only supported in extraction mode"),
+            "{err_dd}"
+        );
     }
 }

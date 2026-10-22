@@ -131,6 +131,7 @@ pub struct PreparedWindows {
     pub catalog_source: WindowsCatalogSource,
     pub source_sha256: [u8; 32],
     pub warnings: Vec<String>,
+    pub answer_xml: Option<Vec<u8>>,
 }
 
 impl PreparedWindows {
@@ -153,6 +154,7 @@ impl PreparedWindows {
 /// ENOSPC while capturing only removes the operation's own workspace.
 pub fn prepare_windows(
     iso_path: &Path,
+    options: &WriteOptions,
     cancel: &CancelToken,
     sink: &dyn ProgressSink,
 ) -> Result<PreparedWindows> {
@@ -212,6 +214,20 @@ pub fn prepare_windows(
     let (catalog, catalog_source) = read_catalog(&snapshot_path, snapshot_len, &info)?;
     validate_catalog(&catalog, &windows)?;
     validate_windows_metadata(&windows)?;
+
+    let answer_xml = if options.windows.bypass_tpm
+        || options.windows.bypass_secure_boot
+        || options.windows.offline_account
+    {
+        Some(generate_autounattend_xml(
+            &windows,
+            &options.windows,
+            &catalog,
+        )?)
+    } else {
+        None
+    };
+
     let mut warnings = info.warnings.clone();
     warnings.push(
         "Windows extraction is UEFI-only; legacy BIOS/BOOTMGR boot is not installed".to_owned(),
@@ -231,7 +247,100 @@ pub fn prepare_windows(
         catalog_source,
         source_sha256,
         warnings,
+        answer_xml,
     })
+}
+
+/// Generate a minimal, escaped autounattend.xml answer file for requested Windows 11 customizations.
+pub fn generate_autounattend_xml(
+    windows: &WindowsInfo,
+    options: &image2usb_core::WindowsOptions,
+    catalog: &[WalkEntry],
+) -> Result<Vec<u8>> {
+    // 1. Conflict detection: if image already contains an answer file, reject
+    for entry in catalog {
+        let name = entry.path.to_ascii_lowercase();
+        if name == "autounattend.xml" || name == "unattend.xml" {
+            return Err(Error::Unsupported(format!(
+                "source image already contains an answer file ({}); refusing to overwrite with customizations",
+                entry.path
+            )));
+        }
+    }
+
+    // 2. Validate capabilities for the exact Windows build
+    if options.bypass_tpm && !windows.capabilities.bypass_tpm {
+        return Err(Error::Unsupported(format!(
+            "TPM bypass is not validated for Windows build {}",
+            windows.build.as_deref().unwrap_or("unknown")
+        )));
+    }
+    if options.bypass_secure_boot && !windows.capabilities.bypass_secure_boot {
+        return Err(Error::Unsupported(format!(
+            "Secure Boot setup bypass is not validated for Windows build {}",
+            windows.build.as_deref().unwrap_or("unknown")
+        )));
+    }
+    if options.offline_account && !windows.capabilities.offline_account {
+        return Err(Error::Unsupported(format!(
+            "offline account flow is not validated for Windows build {}",
+            windows.build.as_deref().unwrap_or("unknown")
+        )));
+    }
+
+    let arch_attr = match windows.architecture {
+        WindowsArchitecture::X64 => "amd64",
+        WindowsArchitecture::Arm64 => "arm64",
+        WindowsArchitecture::Unknown => {
+            return Err(Error::Unsupported(
+                "cannot generate answer file for unknown Windows architecture".to_owned(),
+            ));
+        }
+    };
+
+    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+    xml.push_str("<unattend xmlns=\"urn:schemas-microsoft-com:office:unattend\">\n");
+
+    if options.bypass_tpm || options.bypass_secure_boot {
+        xml.push_str("  <settings pass=\"windowsPE\">\n");
+        xml.push_str(&format!(
+            "    <component name=\"Microsoft-Windows-Setup\" processorArchitecture=\"{arch_attr}\" publicKeyToken=\"31bf3856ad364e35\" language=\"neutral\" versionScope=\"nonSxS\" xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n"
+        ));
+        xml.push_str("      <RunSynchronous>\n");
+
+        let mut order = 1;
+        if options.bypass_tpm {
+            xml.push_str(&format!(
+                "        <RunSynchronousCommand wcm:action=\"add\">\n          <Order>{order}</Order>\n          <Path>reg add HKLM\\System\\Setup\\LabConfig /v BypassTPMCheck /t reg_dword /d 0x00000001 /f</Path>\n        </RunSynchronousCommand>\n"
+            ));
+            order += 1;
+        }
+        if options.bypass_secure_boot {
+            xml.push_str(&format!(
+                "        <RunSynchronousCommand wcm:action=\"add\">\n          <Order>{order}</Order>\n          <Path>reg add HKLM\\System\\Setup\\LabConfig /v BypassSecureBootCheck /t reg_dword /d 0x00000001 /f</Path>\n        </RunSynchronousCommand>\n"
+            ));
+        }
+
+        xml.push_str("      </RunSynchronous>\n");
+        xml.push_str("    </component>\n");
+        xml.push_str("  </settings>\n");
+    }
+
+    if options.offline_account {
+        xml.push_str("  <settings pass=\"oobeSystem\">\n");
+        xml.push_str(&format!(
+            "    <component name=\"Microsoft-Windows-Shell-Setup\" processorArchitecture=\"{arch_attr}\" publicKeyToken=\"31bf3856ad364e35\" language=\"neutral\" versionScope=\"nonSxS\" xmlns:wcm=\"http://schemas.microsoft.com/WMIConfig/2002/State\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n"
+        ));
+        xml.push_str("      <OOBE>\n");
+        xml.push_str("        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>\n");
+        xml.push_str("      </OOBE>\n");
+        xml.push_str("    </component>\n");
+        xml.push_str("  </settings>\n");
+    }
+
+    xml.push_str("</unattend>\n");
+
+    Ok(xml.into_bytes())
 }
 
 fn validate_windows_metadata(windows: &WindowsInfo) -> Result<()> {
@@ -811,7 +920,18 @@ pub fn extract_windows_fat32(
             )));
         }
     }
-    check_extraction_space(&prepared.catalog, &layout, options)?;
+    let mut check_catalog = prepared.catalog.clone();
+    if let Some(xml) = &prepared.answer_xml {
+        check_catalog.push(WalkEntry {
+            path: "autounattend.xml".to_owned(),
+            extent: 0,
+            len: xml.len() as u64,
+            extents: Vec::new(),
+            is_dir: false,
+            symlink_target: None,
+        });
+    }
+    check_extraction_space(&check_catalog, &layout, options)?;
 
     sink.report(ProgressEvent::message(
         Phase::Formatting,
@@ -846,7 +966,8 @@ pub fn extract_windows_fat32(
         .iter()
         .filter(|entry| !entry.is_dir)
         .try_fold(0u64, |total, entry| total.checked_add(entry.len))
-        .ok_or_else(|| Error::InvalidImage("Windows file sizes overflow".to_owned()))?;
+        .ok_or_else(|| Error::InvalidImage("Windows file sizes overflow".to_owned()))?
+        .saturating_add(prepared.answer_xml.as_ref().map_or(0, |x| x.len() as u64));
     let mut source = SnapshotSource::open(prepared)?;
     let (manifest, directories, copied) = {
         let fs = fatfs::FileSystem::new(&mut part, fatfs::FsOptions::new())
@@ -895,6 +1016,28 @@ pub fn extract_windows_fat32(
                 path: dest,
                 size: entry.len,
                 sha256: hasher.map(|hasher| hasher.finalize().into()),
+            });
+        }
+        if let Some(xml_bytes) = &prepared.answer_xml {
+            cancel.check()?;
+            let dest = names.resolve("autounattend.xml", false);
+            let mut out = root
+                .create_file(&dest)
+                .map_err(|err| fat_error(&dest, err))?;
+            out.truncate().map_err(|err| fat_error(&dest, err))?;
+            out.write_all(xml_bytes)
+                .map_err(|err| fat_error(&dest, err))?;
+            out.flush().map_err(|err| fat_error(&dest, err))?;
+            copied += xml_bytes.len() as u64;
+            let sha256 = (options.verify == VerifyMode::Sha256).then(|| {
+                let mut hasher = Sha256::new();
+                hasher.update(xml_bytes);
+                hasher.finalize().into()
+            });
+            manifest.push(ManifestEntry {
+                path: dest,
+                size: xml_bytes.len() as u64,
+                sha256,
             });
         }
         sink.report(copy_progress(
@@ -991,7 +1134,8 @@ fn extract_windows_ntfs_impl(
         .iter()
         .filter(|entry| !entry.is_dir)
         .try_fold(0u64, |total, entry| total.checked_add(entry.len))
-        .ok_or_else(|| Error::InvalidImage("Windows file sizes overflow".to_owned()))?;
+        .ok_or_else(|| Error::InvalidImage("Windows file sizes overflow".to_owned()))?
+        .saturating_add(prepared.answer_xml.as_ref().map_or(0, |x| x.len() as u64));
     validate_ntfs_catalog(&prepared.catalog)?;
     check_ntfs_space(total_bytes, layout.data.len)?;
 
@@ -1074,6 +1218,24 @@ fn extract_windows_ntfs_impl(
                 path: entry.path.clone(),
                 size: entry.len,
                 sha256: hasher.map(|hasher| hasher.finalize().into()),
+            });
+        }
+        if let Some(xml_bytes) = &prepared.answer_xml {
+            cancel.check()?;
+            let mut out = volume.create_file("autounattend.xml")?;
+            out.truncate(0)?;
+            out.write_at(0, xml_bytes)?;
+            out.close()?;
+            copied += xml_bytes.len() as u64;
+            let sha256 = (options.verify == VerifyMode::Sha256).then(|| {
+                let mut hasher = Sha256::new();
+                hasher.update(xml_bytes);
+                hasher.finalize().into()
+            });
+            manifest.push(ManifestEntry {
+                path: "autounattend.xml".to_owned(),
+                size: xml_bytes.len() as u64,
+                sha256,
             });
         }
         sink.report(copy_progress(

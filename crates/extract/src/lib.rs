@@ -25,7 +25,7 @@ pub use layout::{PartitionLayout, plan_layout, write_mbr};
 pub use partition::PartitionIo;
 pub use windows::{
     PreparedWindows, WindowsCatalogSource, extract_windows_fat32, extract_windows_ntfs,
-    prepare_windows, resolve_filesystem,
+    generate_autounattend_xml, prepare_windows, resolve_filesystem,
 };
 
 /// Whether this build can commit Windows media to NTFS plus a UEFI:NTFS ESP.
