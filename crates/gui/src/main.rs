@@ -26,6 +26,8 @@ fn main() -> eframe::Result {
         .try_init();
 
     let options = eframe::NativeOptions {
+        #[cfg(target_os = "macos")]
+        renderer: eframe::Renderer::Glow,
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1040.0, 720.0])
             .with_min_inner_size([820.0, 560.0])
@@ -72,7 +74,7 @@ struct App {
     devices_error: Option<String>,
     selected: Option<String>,
 
-    iso_path: String,
+    iso_path: PathBuf,
     analysis: Option<IsoInfo>,
     analysis_error: Option<String>,
 
@@ -99,7 +101,7 @@ impl App {
             devices: Vec::new(),
             devices_error: None,
             selected: None,
-            iso_path: String::new(),
+            iso_path: PathBuf::new(),
             analysis: None,
             analysis_error: None,
             mode: ModeChoice::Auto,
@@ -135,7 +137,7 @@ impl App {
     }
 
     fn analyze(&mut self, ctx: egui::Context) {
-        let path = PathBuf::from(self.iso_path.trim());
+        let path = self.iso_path.clone();
         if path.as_os_str().is_empty() {
             self.analysis_error = Some("Choose an ISO image first.".to_owned());
             return;
@@ -222,7 +224,7 @@ impl App {
             );
         }
 
-        let iso = PathBuf::from(self.iso_path.trim());
+        let iso = self.iso_path.clone();
         let cancel = CancelToken::new();
         self.cancel = Some(cancel.clone());
         self.busy = true;
@@ -303,13 +305,15 @@ impl App {
     fn handle_messages(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Msg::Devices(Ok(devices)) => {
+                Msg::Devices(Ok(mut devices)) => {
+                    devices.retain(DeviceInfo::is_safe_target);
                     self.devices = devices;
                     self.devices_error = None;
                     if self.selected.as_ref().is_some_and(|id| {
                         !self.devices.iter().any(|d| d.id.as_str() == id.as_str())
                     }) {
                         self.selected = None;
+                        self.confirmed = false;
                     }
                 }
                 Msg::Devices(Err(err)) => self.devices_error = Some(err),
@@ -367,25 +371,24 @@ impl App {
             ui.colored_label(egui::Color32::LIGHT_RED, err);
         }
         ui.separator();
+        if self.devices.is_empty() && self.devices_error.is_none() {
+            ui.label("No eligible devices. Connect a writable USB drive or SD card, then refresh.");
+        }
 
         let mut clicked = None;
         egui::ScrollArea::vertical()
             .max_height(420.0)
             .show(ui, |ui| {
                 for device in &self.devices {
-                    let safe = device.is_safe_target();
                     let selected = self.selected.as_deref() == Some(device.id.as_str());
                     let label = format!(
-                        "{}  •  {}  •  {}{}",
+                        "{}  •  {}  •  {}",
                         device.model,
                         format_bytes(device.size),
                         device.bus,
-                        if safe { "" } else { "  •  BLOCKED" }
                     );
-                    let response = ui.add_enabled(
-                        safe && !self.busy,
-                        egui::Button::selectable(selected, label),
-                    );
+                    let response =
+                        ui.add_enabled(!self.busy, egui::Button::selectable(selected, label));
                     if response.clicked() {
                         clicked = Some(device.id.as_str().to_owned());
                     }
@@ -395,16 +398,6 @@ impl App {
                             ui.small(format!("mounted: {}", device.mount_points.join(", ")));
                         }
                     });
-                    if !safe {
-                        ui.small(
-                            egui::RichText::new(if device.is_system {
-                                "system disk — never writable"
-                            } else {
-                                "internal disk — blocked"
-                            })
-                            .color(egui::Color32::LIGHT_RED),
-                        );
-                    }
                     ui.add_space(6.0);
                 }
             });
@@ -418,28 +411,34 @@ impl App {
         ui.heading("Image");
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.iso_path)
-                    .hint_text("/path/to/image.iso")
-                    .desired_width(420.0),
-            );
-            if response.changed() {
-                self.analysis = None;
-                self.analysis_error = None;
-                self.confirmed = false;
-            }
-            if ui.button("Browse…").clicked()
+            if ui
+                .add_enabled(!self.busy, egui::Button::new("Choose ISO…"))
+                .clicked()
                 && let Some(path) = rfd::FileDialog::new()
                     .add_filter("Disk images", &["iso", "img"])
                     .pick_file()
             {
-                self.iso_path = path.display().to_string();
+                self.iso_path = path;
                 self.analyze(ui.ctx().clone());
             }
-            if ui.button("Analyze").clicked() {
-                self.analyze(ui.ctx().clone());
-            }
+            ui.menu_button("Download ISO…", |ui| {
+                ui.label("Official download pages (opens your browser):");
+                ui.hyperlink_to("Ubuntu", "https://ubuntu.com/download/desktop");
+                ui.hyperlink_to("Fedora", "https://fedoraproject.org/workstation/download");
+                ui.hyperlink_to("Debian", "https://www.debian.org/distrib/");
+                ui.hyperlink_to("Linux Mint", "https://linuxmint.com/download.php");
+                ui.hyperlink_to("Arch Linux", "https://archlinux.org/download/");
+                ui.separator();
+                ui.label("After downloading, use Choose ISO… to select the file.");
+                ui.label("Choose the ISO architecture for the computer that will boot the USB.");
+            });
         });
+        if let Some(name) = self.iso_path.file_name() {
+            ui.label(name.to_string_lossy())
+                .on_hover_text(self.iso_path.display().to_string());
+        } else {
+            ui.label("Choose an image from your computer or download a Linux ISO.");
+        }
 
         if let Some(err) = &self.analysis_error {
             ui.add_space(4.0);

@@ -20,7 +20,7 @@ lipo -create \
 lipo -create \
   "target/x86_64-apple-darwin/release/image2usb" \
   "target/aarch64-apple-darwin/release/image2usb" \
-  -output "$APP/Contents/MacOS/image2usb"
+  -output "$APP/Contents/MacOS/image2usb-cli"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

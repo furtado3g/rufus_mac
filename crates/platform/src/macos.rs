@@ -18,6 +18,8 @@ const DKIOCGETBLOCKCOUNT: libc::c_ulong = 0x4008_6419;
 const DKIOCGETPHYSICALBLOCKSIZE: libc::c_ulong = 0x4004_6429;
 /// `F_FULLFSYNC`, which flushes the drive's own write cache.
 const F_FULLFSYNC: libc::c_int = 51;
+/// `DKIOCSYNCHRONIZECACHE` from `<sys/disk.h>`.
+const DKIOCSYNCHRONIZECACHE: libc::c_ulong = 0x2000_6416;
 
 pub struct MacPlatform;
 
@@ -192,16 +194,48 @@ impl RawIo for MacRawIo {
     }
 
     fn sync(&mut self) -> Result<()> {
-        self.file.sync_all()?;
         let fd = self.file.as_raw_fd();
-        // SAFETY: `fd` is a valid descriptor owned by `self.file`; fcntl does
-        // not retain it. F_FULLFSYNC takes no argument.
-        let rc = unsafe { libc::fcntl(fd, F_FULLFSYNC) };
-        if rc != 0 {
-            let err = std::io::Error::last_os_error();
-            tracing::warn!(%err, "F_FULLFSYNC failed; data may still be in the drive cache");
+        // `fsync` on a raw disk can fail with ENOTTY on macOS even though every
+        // write reached the drive. Try the disk-specific flush ioctls first and
+        // only report an error when no flush path succeeded.
+        // SAFETY: `fd` is a valid descriptor owned by `self.file`; these calls
+        // do not retain it and take no pointer arguments.
+        if unsafe { libc::fcntl(fd, F_FULLFSYNC) } == 0 {
+            return Ok(());
         }
-        Ok(())
+        let fullfsync = std::io::Error::last_os_error();
+        if unsafe { libc::ioctl(fd, DKIOCSYNCHRONIZECACHE) } == 0 {
+            return Ok(());
+        }
+        let ioctl_err = std::io::Error::last_os_error();
+        let err = match self.file.sync_all() {
+            Ok(()) => {
+                tracing::warn!(
+                    %fullfsync,
+                    %ioctl_err,
+                    "raw-disk flush unsupported; fsync succeeded"
+                );
+                return Ok(());
+            }
+            Err(err) => err,
+        };
+        // Raw devices on macOS report ENOTTY for fsync/flush requests they do
+        // not implement. The writes themselves completed; closing the device
+        // flushes the kernel cache, so this is not a failed write.
+        if matches!(
+            err.raw_os_error(),
+            Some(libc::ENOTTY | libc::EINVAL | libc::ENOTSUP)
+        ) {
+            tracing::warn!(
+                %fullfsync,
+                %ioctl_err,
+                %err,
+                "raw-disk flush unsupported; writes completed without an explicit cache flush"
+            );
+            return Ok(());
+        }
+        tracing::warn!(%fullfsync, %ioctl_err, %err, "all raw-disk flush paths failed");
+        Err(Error::Io(err))
     }
 
     fn invalidate(&mut self) -> Result<()> {
