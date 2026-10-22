@@ -365,8 +365,9 @@ fn write(
         match resolved {
             ResolvedMode::Dd => "byte-for-byte copy".to_owned(),
             ResolvedMode::Extract => format!(
-                "{} + FAT32, file extraction",
-                options.scheme.to_string().to_uppercase()
+                "{} + {}, file extraction",
+                options.scheme.to_string().to_uppercase(),
+                options.filesystem
             ),
         }
     );
