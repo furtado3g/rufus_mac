@@ -110,11 +110,7 @@ pub fn plan_windows_layout(
             "device size must be a multiple of its {sector_size}-byte logical sector"
         )));
     }
-    if UEFI_NTFS_IMAGE.len() as u64 != UEFI_NTFS_BYTES {
-        return Err(Error::Other(
-            "embedded UEFI:NTFS image has an unexpected length".to_owned(),
-        ));
-    }
+    validate_uefi_ntfs_bpb()?;
 
     let sector = u64::from(sector_size);
     let start_byte = RESERVED_BYTES;
@@ -207,6 +203,33 @@ pub fn plan_windows_layout(
     };
 
     Ok(WindowsLayout { data, esp, gpt })
+}
+
+/// Validate the FAT BPB embedded in the pinned, signed UEFI:NTFS volume.
+///
+/// The asset is written byte-for-byte and is never rebuilt or patched. This
+/// check catches an accidentally replaced asset or a length/BPB mismatch before
+/// the partition table is written. Its 512-byte logical-sector geometry is also
+/// why the NTFS path currently refuses devices with 4096-byte logical sectors.
+fn validate_uefi_ntfs_bpb() -> Result<()> {
+    let image = UEFI_NTFS_IMAGE;
+    if image.len() as u64 != UEFI_NTFS_BYTES {
+        return Err(Error::Other(
+            "embedded UEFI:NTFS image has an unexpected length".to_owned(),
+        ));
+    }
+    let bytes_per_sector = u16::from_le_bytes([image[11], image[12]]);
+    let total_sectors = u16::from_le_bytes([image[19], image[20]]);
+    if bytes_per_sector != 512
+        || total_sectors != 2048
+        || u64::from(bytes_per_sector) * u64::from(total_sectors) != UEFI_NTFS_BYTES
+        || image[510..512] != [0x55, 0xAA]
+    {
+        return Err(Error::Other(
+            "embedded UEFI:NTFS image has an incompatible FAT BPB".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Write the selected partition table. Filesystem contents are written later.
@@ -393,6 +416,13 @@ fn crc32(data: &[u8]) -> u32 {
 mod tests {
     use super::*;
     use image2usb_core::FileDevice;
+
+    #[test]
+    fn embedded_asset_has_the_expected_fat_bpb() {
+        validate_uefi_ntfs_bpb().unwrap();
+        assert_eq!(&UEFI_NTFS_IMAGE[54..62], b"FAT12   ");
+        assert_eq!(&UEFI_NTFS_IMAGE[43..54], b"RUFUS_BOOT ");
+    }
 
     #[test]
     fn plans_two_non_overlapping_partitions() {

@@ -500,9 +500,11 @@ approved for a public release.
   type `0xEF` at the end, 1 MiB alignment and reserved gaps.
 - GPT: Microsoft Basic Data entry first, EFI System Partition second, primary
   and backup headers/entry arrays with CRC32. The same two partitions are used.
-- 512-byte logical sectors only in this increment. The code refuses 4Kn before
-  touching the target because the asset BPB and firmware behavior are not yet
-  validated at 4096-byte logical sectors.
+- 512-byte logical sectors only in this increment. Before touching the target
+  the code validates the embedded asset's FAT BPB (512 bytes/sector, 2048
+  sectors, 1 MiB total, `0x55AA` signature) as well as the overall partition
+  layout. It refuses 4Kn before writing because the asset's 512-byte BPB and
+  firmware behavior are not yet validated at 4096-byte logical sectors.
 - NTFS is formatted through `format_ntfs` with the real partition LBA. The
   Windows catalog is copied at 64-bit file offsets, then the pinned FAT image is
   written byte-for-byte to the ESP. NTFS is synced/unmounted and the asset is
@@ -530,7 +532,7 @@ cargo test -p image2usb-cli -p image2usb-gui \
 | `cargo check --workspace --locked` (default features) | PASS |
 | `cargo test --workspace --locked` (default features) | PASS: 4 CLI, 22 core, 28+17 extract, 8+12 ISO, GUI/platform/testiso 0 |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | PASS |
-| extract feature tests | PASS: 33 unit, 17 integration, 2 NTFS/UEFI:NTFS |
+| extract feature tests | PASS: 34 unit, 17 integration, 2 NTFS/UEFI:NTFS |
 | extract feature Clippy with `-D warnings` | PASS |
 | CLI/GUI feature tests | PASS: 4 CLI tests, 0 GUI tests |
 | `cargo fmt --all --check` | PASS |
