@@ -908,6 +908,44 @@ mod tests {
     }
 
     #[test]
+    fn large_windows_install_image_selects_ntfs_and_rejects_explicit_fat32() {
+        let dir = tempfile::tempdir().unwrap();
+        let windows = dir.path().join("windows.iso");
+        build_windows_image(&windows, WindowsFixture::X64Wim);
+        let mut info = analyze_iso(&windows).unwrap();
+        assert!(!info.windows.as_ref().unwrap().install_parts.is_empty());
+        info.windows.as_mut().unwrap().install_parts[0].size = 4_294_967_296;
+
+        let (filesystem, reason) = image2usb_extract::resolve_filesystem(
+            FileSystemChoice::Auto,
+            ResolvedMode::Extract,
+            &info,
+        )
+        .unwrap();
+        assert_eq!(filesystem, FilesystemKind::Ntfs);
+        assert!(reason.contains("exceeds the FAT32 file limit"), "{reason}");
+
+        assert!(
+            image2usb_extract::resolve_filesystem(
+                FileSystemChoice::Fat32,
+                ResolvedMode::Extract,
+                &info
+            )
+            .is_err()
+        );
+
+        info.windows.as_mut().unwrap().install_parts[0].size = 4_294_967_295;
+        let (filesystem, reason) = image2usb_extract::resolve_filesystem(
+            FileSystemChoice::Auto,
+            ResolvedMode::Extract,
+            &info,
+        )
+        .unwrap();
+        assert_eq!(filesystem, FilesystemKind::Fat32);
+        assert!(reason.contains("fits FAT32"), "{reason}");
+    }
+
+    #[test]
     fn explicit_ntfs_for_linux_and_filesystem_in_dd_are_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let linux = dir.path().join("linux.iso");

@@ -530,12 +530,17 @@ cargo test -p image2usb-cli -p image2usb-gui \
 | Check | Result |
 | --- | --- |
 | `cargo check --workspace --locked` (default features) | PASS |
-| `cargo test --workspace --locked` (default features) | PASS: 4 CLI, 22 core, 28+17 extract, 8+12 ISO, GUI/platform/testiso 0 |
+| `cargo test --workspace --locked` (default features) | PASS: 5 CLI, 22 core, 28+17 extract, 8+12 ISO, GUI/platform/testiso 0 |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | PASS |
 | extract feature tests | PASS: 34 unit, 17 integration, 2 NTFS/UEFI:NTFS |
 | extract feature Clippy with `-D warnings` | PASS |
-| CLI/GUI feature tests | PASS: 4 CLI tests, 0 GUI tests |
+| CLI/GUI feature tests | PASS: 5 CLI tests, 0 GUI tests |
 | `cargo fmt --all --check` | PASS |
+
+CLI resolution tests cover the FAT32 limit boundary: automatic selection
+chooses NTFS above 4,294,967,295 bytes, keeps FAT32 at the limit, and explicit
+FAT32 is rejected above the limit. This is selection logic only; it does not
+split a real WIM.
 
 The NTFS integration test builds a synthetic Windows-shaped ISO, commits it to
 a 96 MiB file-backed target with `--verify` for both MBR and GPT, checks both
