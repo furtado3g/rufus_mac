@@ -778,6 +778,29 @@ DB/DBX behavior, a physical USB device, or `chkdsk`.
 | Feature-enabled Clippy for platform/extract/CLI/GUI | PASS |
 | `cargo fmt --all --check` and `git diff --check` | PASS |
 
+### Packaged macOS artifact
+
+After the commit, the host-only package was rebuilt with the patched native
+prefix:
+
+```sh
+IMAGE2USB_WINDOWS_MEDIA_PREFIX="$PWD/target/windows-media/x86_64/install" \
+  sh scripts/package-macos.sh 0.1.0 --native
+```
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `dist/Image2USB-0.1.0-macos-x86_64-ntfs.dmg` | `d05724767883942ea9e7ae48c3592cbdd036ca7bd969de0c96c58edfaac822ca` |
+| `dist/Image2USB-0.1.0-macos-x86_64-ntfs.zip` | `23aba25a94705f05c391053bdc889dcbc0736c35e09bf0ec549aa5518b090015` |
+
+Both embedded executables are thin `x86_64`; `codesign --verify --deep
+--strict` reports the bundle valid and satisfying its designated requirement.
+The packaged CLI prints `image2usb 0.1.0`, `list --json` returns `[]` without a
+device, and `analyze` on the real ISO reports Windows/x64 with
+`install_wim_size 7826284843` and the UDF warning. The package is ad-hoc signed,
+not notarized, and its DMG/ZIP were not boot-tested; the boot evidence above
+came from the development binary and a file-backed target.
+
 ### Remaining limits
 
 - Physical USB media, Windows `chkdsk`, Secure Boot on/off, PE signature and
